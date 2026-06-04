@@ -1,0 +1,239 @@
+server:
+  port: 9090
+
+spring:
+  devtools:
+    restart:
+      enabled: false
+    add-properties: false
+
+  application:
+    name: monitoring
+
+  docker:
+    compose:
+      enabled: false
+
+  task:
+    scheduling:
+      pool:
+        # Le guard Huawei centralise déjà les appels; on garde un pool modéré pour éviter les rafales au démarrage.
+        size: 3
+
+  mongodb:
+    uri: ${MONGODB_URI:mongodb://localhost:27017/monitoring}
+
+  servlet:
+    multipart:
+      max-file-size: 8MB
+      max-request-size: 9MB
+
+providers: 
+  huawei: 
+    enabled: true 
+    base-url: https://intl.fusionsolar.huawei.com
+    username: api.api.api.api.api.api
+    password: 
+     # Les 5 comptes Northbound Huawei. # Ne mets pas le mot de passe en dur dans Git: exporte HUAWEI_API_PASSWORD au lancement. 
+    accounts:
+     # Compte FusionSolar / entreprise 1: ITSCOM
+     # Les 5 identifiants ci-dessous sont des API Northbound du même compte FusionSolar.
+     - key: itscom-api-01
+       group: itscom
+       username: api.api.api.api.api.api
+       password: 
+     - key: itscom-api-02
+       group: itscom
+       username: api.api
+       password: 
+     - key: itscom-api-03
+       group: itscom
+       username: api.api.api
+       password: 
+     - key: itscom-api-04
+       group: itscom
+       username: api.api.api.api
+       password: 
+     - key: itscom-api-05
+       group: itscom
+       username: api.api.api.api.api
+       password: 
+
+     # Compte FusionSolar / entreprise 2: Global Engineering energy and construction
+     # Même mot de passe que le compte configuré en providers.huawei.password.
+     - key: global-engineering-api-01
+       group: global-engineering
+       username: client1
+       password: 
+     - key: global-engineering-api-02
+       group: global-engineering
+       username: client2
+       password: 
+     - key: global-engineering-api-03
+       group: global-engineering
+       username: client3
+       password: 
+     - key: global-engineering-api-04
+       group: global-engineering
+       username: client4
+       password: 
+     - key: global-engineering-api-05
+       group: global-engineering
+       username: client5
+       password: 
+
+  solis:
+    enabled: true
+    base-url: ${SOLIS_BASE_URL:https://www.soliscloud.com:13333}
+    key-id: 
+    key-secret: 
+
+  growatt:
+    enabled: true
+    base-url: https://openapi.growatt.com
+    accounts:
+      - key: growatt-1
+        group: ITS
+        token: 
+      - key: growatt-2
+        group: COMPTE2
+        token: 
+
+app:
+  auth:
+    # Login projet isolé: affiche uniquement les sites dont le nom/code commence par ARI_, BAR_, ...
+    username: 
+    password: 
+
+    # Login clients indépendants: affiche tous les sites Huawei/Solis qui ne commencent pas par ces préfixes.
+    independent-username: 
+    independent-password: 
+
+  huawei-api:
+    # Guard FusionSolar par groupe / vraie entreprise.
+    # Les 5 API Northbound du même group partagent cette cadence.
+    # Deux groups différents, par exemple itscom et global-engineering,
+    # ne se bloquent plus entre eux.
+    group-min-request-interval-ms: 300000
+    history-group-min-request-interval-ms: 60000
+    login-min-request-interval-ms: 300000
+    initial-rate-limit-cooldown-ms: 1800000
+    max-rate-limit-cooldown-ms: 10800000
+
+  huawei-sync:
+    summary-cron: "0 */10 * * * *"
+    year-energy-enabled: false
+
+    device-sync-initial-delay-ms: 1800000
+    device-sync-fixed-delay-ms: 43200000
+
+    batch-size: 100
+    delay-between-batches-ms: 90000
+    min-summary-refresh-interval-ms: 600000
+
+    # Les historiques Huawei sont maintenant gérés par history-batch-backfill.
+    min-history-provider-delay-ms: 90000
+
+    year-energy-initial-delay-ms: 900000
+    year-energy-fixed-delay-ms: 3600000
+    year-energy-batch-size: 1
+    year-energy-delay-between-sites-ms: 60000
+    year-energy-max-age-ms: 21600000
+
+  solis-sync:
+    min-summary-refresh-interval-ms: 600000
+    min-history-provider-delay-ms: 2500
+
+    device-sync-initial-delay-ms: 90000
+    device-sync-fixed-delay-ms: 43200000
+
+    # Désactivé par défaut pour ne pas doubler les appels avec le backfill Mongo.
+    history-warmup-enabled: false
+
+    history-batch-size: 1
+    history-delay-between-sites-ms: 15000
+
+    history-current-initial-delay-ms: 240000
+    history-current-fixed-delay-ms: 900000
+
+    history-yearly-initial-delay-ms: 1200000
+    history-yearly-fixed-delay-ms: 21600000
+
+  growatt-sync:
+    summary-initial-delay-ms: 15000
+    summary-fixed-delay-ms: 600000
+    min-summary-refresh-interval-ms: 600000
+    min-history-provider-delay-ms: 5000
+    device-sync-initial-delay-ms: 120000
+    device-sync-fixed-delay-ms: 43200000
+
+  history-batch-backfill:
+    enabled: true
+
+    # Huawei: batch API de 100 sites max par appel.
+    # Avec le rate limit par group, 2 appels par passage permettent de traiter
+    # itscom et global-engineering sans les bloquer mutuellement.
+    initial-delay-ms: 60000
+    fixed-delay-ms: 15000
+    max-huawei-calls-per-run: 2
+    huawei-batch-size: 100
+
+    # Si aucune date de mise en service / swap n'existe, on ne recule pas plus que 10 ans.
+    max-lookback-months: 120
+
+    # Quota sécurisé par endpoint Huawei Report.
+    # Les APIs report sont limitées par jour selon le nombre de plantes; 22 garde une marge.
+    huawei-report-daily-call-limit: 22
+
+    # Collecte aussi les buckets DAY historiques yyyy-MM-dd pour alimenter la courbe Day par heures.
+    # 30 = collecte les 30 derniers jours en détail. 0 = full historique DAY, mais très long.
+    historic-day-backfill-enabled: true
+    historic-day-lookback-days: 30
+
+    # Les buckets vides/erreur ne sont pas retentés en boucle.
+    empty-history-retry-ms: 86400000
+
+    # Refresh automatique des données courantes.
+    current-day-refresh-ms: 900000       # 15 min pour la courbe jour actuelle
+    current-month-refresh-ms: 3600000    # 1 h pour ajouter le nouveau jour dans le mois courant
+    current-year-refresh-ms: 21600000    # 6 h pour les mois de l'année courante
+    yearly-refresh-ms: 86400000          # 24 h pour all-time/yearly
+
+  solis-batch-backfill:
+    enabled: true
+    initial-delay-ms: 180000
+    fixed-delay-ms: 30000
+    max-calls-per-run: 2
+    batch-size: 100
+    max-lookback-months: 120
+    empty-history-retry-ms: 86400000
+    current-month-refresh-ms: 3600000
+    current-year-refresh-ms: 21600000
+
+  history-backfill:
+    enabled: true
+
+    # Ce worker ne traite plus Huawei; il reste pour le DAY Solis et les historiques Growatt.
+    initial-delay-ms: 120000
+    fixed-delay-ms: 15000
+    max-provider-calls-per-run: 3
+    delay-between-provider-calls-ms: 0
+    empty-history-retry-ms: 86400000
+    max-lookback-months: 120
+    historic-day-backfill-enabled: true
+    historic-day-lookback-days: 30
+    current-day-refresh-ms: 900000
+    current-month-refresh-ms: 3600000
+    current-year-refresh-ms: 21600000
+
+  ai-report:
+    # IA cloud pour le module Rapport AI.
+    # Remplace la valeur ci-dessous par ta vraie clé Gemini API.
+    # La clé est volontairement en dur dans ce YAML selon ta demande.
+    provider: "gemini"
+    gemini:
+      api-key: 
+      model: "gemini-2.5-flash"
+      base-url: "https://generativelanguage.googleapis.com/v1beta"
+      timeout-seconds: 180
+      max-output-tokens: 65000
