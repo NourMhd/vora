@@ -17,7 +17,7 @@ spring:
   task:
     scheduling:
       pool:
-        # Le guard Huawei centralise déjà les appels; on garde un pool modéré pour éviter les rafales au démarrage.
+        # Le guard Huawei centralise déjà les appels.
         size: 3
 
   mongodb:
@@ -28,65 +28,69 @@ spring:
       max-file-size: 8MB
       max-request-size: 9MB
 
-providers: 
-  huawei: 
-    enabled: true 
+providers:
+  huawei:
+    enabled: true
     base-url: https://intl.fusionsolar.huawei.com
     username: api.api.api.api.api.api
-    password: 
-     # Les 5 comptes Northbound Huawei. # Ne mets pas le mot de passe en dur dans Git: exporte HUAWEI_API_PASSWORD au lancement. 
+    password: ""
     accounts:
-     # Compte FusionSolar / entreprise 1: ITSCOM
-     # Les 5 identifiants ci-dessous sont des API Northbound du même compte FusionSolar.
-     - key: itscom-api-01
-       group: itscom
-       username: api.api.api.api.api.api
-       password: 
-     - key: itscom-api-02
-       group: itscom
-       username: api.api
-       password: 
-     - key: itscom-api-03
-       group: itscom
-       username: api.api.api
-       password: 
-     - key: itscom-api-04
-       group: itscom
-       username: api.api.api.api
-       password: 
-     - key: itscom-api-05
-       group: itscom
-       username: api.api.api.api.api
-       password: 
+      - key: itscom-api-01
+        group: itscom
+        username: api.api.api.api.api.api
+        password: ""
 
-     # Compte FusionSolar / entreprise 2: Global Engineering energy and construction
-     # Même mot de passe que le compte configuré en providers.huawei.password.
-     - key: global-engineering-api-01
-       group: global-engineering
-       username: client1
-       password: 
-     - key: global-engineering-api-02
-       group: global-engineering
-       username: client2
-       password: 
-     - key: global-engineering-api-03
-       group: global-engineering
-       username: client3
-       password: 
-     - key: global-engineering-api-04
-       group: global-engineering
-       username: client4
-       password: 
-     - key: global-engineering-api-05
-       group: global-engineering
-       username: client5
-       password: 
+      - key: itscom-api-02
+        group: itscom
+        username: api.api
+        password: ""
+
+      - key: itscom-api-03
+        group: itscom
+        username: api.api.api
+        password: ""
+
+      - key: itscom-api-04
+        group: itscom
+        username: api.api.api.api
+        password: ""
+
+      - key: itscom-api-05
+        group: itscom
+        username: api.api.api.api.api
+        password: ""
+
+      # Compte FusionSolar / entreprise 2.
+      - key: global-engineering-api-01
+        group: global-engineering
+        username: client1
+        password: ""
+
+      - key: global-engineering-api-02
+        group: global-engineering
+        username: client2
+        password: ""
+
+      - key: global-engineering-api-03
+        group: global-engineering
+        username: client3
+        password: ""
+
+      - key: global-engineering-api-04
+        group: global-engineering
+        username: client4
+        password: ""
+
+      - key: global-engineering-api-05
+        group: global-engineering
+        username: client5
+        password: ""
 
   solis:
     enabled: true
     base-url: ${SOLIS_BASE_URL:https://www.soliscloud.com:13333}
-    key-id: 
-    key-secret: 
+    key-id: ${SOLIS_KEY_ID:}
+    key-secret: ${SOLIS_KEY_SECRET:}
 
   growatt:
     enabled: true
@@ -94,26 +98,34 @@ providers:
     accounts:
       - key: growatt-1
         group: ITS
-        token: 
+        token: ""
+
       - key: growatt-2
         group: COMPTE2
-        token: 
+        token: ""
 
 app:
   auth:
-    # Login projet isolé: affiche uniquement les sites dont le nom/code commence par ARI_, BAR_, ...
-    username: 
-    password: 
+    # Sites dont le nom/code commence par les préfixes projet autorisés.
+    username: vora.orange
+    password: ""
 
-    # Login clients indépendants: affiche tous les sites Huawei/Solis qui ne commencent pas par ces préfixes.
-    independent-username: 
-    independent-password: 
+    # Même périmètre, avec accès au Planning terrain.
+    orange-local-username: vora.orange.local
+    orange-local-password: ""
+
+    # Sites appartenant au groupe FusionSolar global-engineering.
+    ooredoo-username: vora.ooredoo
+    ooredoo-password: ""
+
+    # Sites de tous les fournisseurs sans préfixe projet.
+    independent-username: client
+    independent-password: ""
 
   huawei-api:
-    # Guard FusionSolar par groupe / vraie entreprise.
-    # Les 5 API Northbound du même group partagent cette cadence.
-    # Deux groups différents, par exemple itscom et global-engineering,
-    # ne se bloquent plus entre eux.
+    # Les comptes d'un même groupe partagent cette cadence.
+    # Deux groupes différents ne se bloquent pas entre eux.
+    quota-scope: ${HUAWEI_QUOTA_SCOPE:group}
     group-min-request-interval-ms: 300000
     history-group-min-request-interval-ms: 60000
     login-min-request-interval-ms: 300000
@@ -122,6 +134,10 @@ app:
 
   huawei-sync:
     summary-cron: "0 */10 * * * *"
+    inventory-initial-delay-ms: 30000
+    inventory-fixed-delay-ms: 10800000
+    state-initial-delay-ms: 15000
+    state-retry-check-ms: 15000
     year-energy-enabled: false
 
     device-sync-initial-delay-ms: 1800000
@@ -131,7 +147,7 @@ app:
     delay-between-batches-ms: 90000
     min-summary-refresh-interval-ms: 600000
 
-    # Les historiques Huawei sont maintenant gérés par history-batch-backfill.
+    # Les historiques Huawei sont gérés par history-batch-backfill.
     min-history-provider-delay-ms: 90000
 
     year-energy-initial-delay-ms: 900000
@@ -141,13 +157,14 @@ app:
     year-energy-max-age-ms: 21600000
 
   solis-sync:
-    min-summary-refresh-interval-ms: 600000
-    min-history-provider-delay-ms: 2500
+    summary-cron: "0 */5 * * * *"
+    min-summary-refresh-interval-ms: 300000
+    min-history-provider-delay-ms: 0
 
     device-sync-initial-delay-ms: 90000
     device-sync-fixed-delay-ms: 43200000
 
-    # Désactivé par défaut pour ne pas doubler les appels avec le backfill Mongo.
+    # Désactivé pour ne pas doubler les appels avec le backfill Mongo.
     history-warmup-enabled: false
 
     history-batch-size: 1
@@ -163,76 +180,78 @@ app:
     summary-initial-delay-ms: 15000
     summary-fixed-delay-ms: 600000
     min-summary-refresh-interval-ms: 600000
-    min-history-provider-delay-ms: 5000
+    min-history-provider-delay-ms: 0
     device-sync-initial-delay-ms: 120000
     device-sync-fixed-delay-ms: 43200000
 
   history-batch-backfill:
     enabled: true
-
-    # Huawei: batch API de 100 sites max par appel.
-    # Avec le rate limit par group, 2 appels par passage permettent de traiter
-    # itscom et global-engineering sans les bloquer mutuellement.
     initial-delay-ms: 60000
     fixed-delay-ms: 15000
     max-huawei-calls-per-run: 2
     huawei-batch-size: 100
-
-    # Si aucune date de mise en service / swap n'existe, on ne recule pas plus que 10 ans.
     max-lookback-months: 120
-
-    # Quota sécurisé par endpoint Huawei Report.
-    # Les APIs report sont limitées par jour selon le nombre de plantes; 22 garde une marge.
     huawei-report-daily-call-limit: 22
-
-    # Collecte aussi les buckets DAY historiques yyyy-MM-dd pour alimenter la courbe Day par heures.
-    # 30 = collecte les 30 derniers jours en détail. 0 = full historique DAY, mais très long.
     historic-day-backfill-enabled: true
     historic-day-lookback-days: 30
-
-    # Les buckets vides/erreur ne sont pas retentés en boucle.
     empty-history-retry-ms: 86400000
 
-    # Refresh automatique des données courantes.
-    current-day-refresh-ms: 900000       # 15 min pour la courbe jour actuelle
-    current-month-refresh-ms: 3600000    # 1 h pour ajouter le nouveau jour dans le mois courant
-    current-year-refresh-ms: 21600000    # 6 h pour les mois de l'année courante
-    yearly-refresh-ms: 86400000          # 24 h pour all-time/yearly
+    # Reprises vides : 24 h, 48 h, 96 h... avec plafond de 7 jours.
+    # Après 3 réponses valides mais vides, contrôle périodique du bucket.
+    empty-history-max-retry-ms: 604800000
+    empty-confirmed-after-attempts: 3
+
+    current-day-refresh-ms: 900000
+
+    # Le mois courant est cumulatif : 4 contrôles par jour.
+    current-month-refresh-ms: 21600000
+    current-year-refresh-ms: 21600000
+    yearly-refresh-ms: 86400000
+
+    incomplete-month-refresh-ms: 21600000
+    invalid-value-month-refresh-ms: 21600000
+    month-finalization-grace-hours: 6
 
   solis-batch-backfill:
-    enabled: true
+    # Désactivé pour éviter les courbes Solis identiques entre sites.
+    # Le remplissage MONTH/YEAR passe par des appels station par station.
+    enabled: false
     initial-delay-ms: 180000
     fixed-delay-ms: 30000
     max-calls-per-run: 2
     batch-size: 100
     max-lookback-months: 120
     empty-history-retry-ms: 86400000
-    current-month-refresh-ms: 3600000
+    current-month-refresh-ms: 21600000
     current-year-refresh-ms: 21600000
 
   history-backfill:
     enabled: true
 
-    # Ce worker ne traite plus Huawei; il reste pour le DAY Solis et les historiques Growatt.
+    # Workers indépendants Solis/Growatt.
+    # La cadence est protégée dans les clients API.
     initial-delay-ms: 120000
-    fixed-delay-ms: 15000
-    max-provider-calls-per-run: 3
+    fixed-delay-ms: 1000
+    max-provider-calls-per-run: 6
     delay-between-provider-calls-ms: 0
     empty-history-retry-ms: 86400000
+
+    # 6 h : évite de rappeler le même mois incomplet en boucle.
+    incomplete-month-refresh-ms: 21600000
+    invalid-value-month-refresh-ms: 21600000
     max-lookback-months: 120
     historic-day-backfill-enabled: true
     historic-day-lookback-days: 30
+    solis-year-backfill-enabled: true
     current-day-refresh-ms: 900000
-    current-month-refresh-ms: 3600000
+    current-month-refresh-ms: 21600000
     current-year-refresh-ms: 21600000
 
   ai-report:
-    # IA cloud pour le module Rapport AI.
-    # Remplace la valeur ci-dessous par ta vraie clé Gemini API.
-    # La clé est volontairement en dur dans ce YAML selon ta demande.
+    # Clé fournie par variable d'environnement ou fichier privé externe.
     provider: "gemini"
     gemini:
-      api-key: 
+      api-key: ${GEMINI_API_KEY:}
       model: "gemini-2.5-flash"
       base-url: "https://generativelanguage.googleapis.com/v1beta"
       timeout-seconds: 180

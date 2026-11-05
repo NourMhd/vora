@@ -34,7 +34,13 @@ public class GrowattCloudClient {
 
     private final ProvidersProperties providersProperties;
     private final ObjectMapper objectMapper;
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate = createRestTemplate();
+    private static RestTemplate createRestTemplate() {
+        var factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(15000);
+        factory.setReadTimeout(30000);
+        return new RestTemplate(factory);
+    }
 
     private final Map<String, Instant> lastCallAtByAccount = new HashMap<>();
 

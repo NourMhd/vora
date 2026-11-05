@@ -1,0 +1,102 @@
+name: Multi Vora CI
+
+on:
+  push:
+    branches: [main, devops/setup-ci]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend - tests et JAR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      mongodb:
+        image: mongo:7.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MONGODB_URI: mongodb://localhost:27017/monitoring_ci
+      PROVIDERS_HUAWEI_ENABLED: 'false'
+      PROVIDERS_SOLIS_ENABLED: 'false'
+      PROVIDERS_GROWATT_ENABLED: 'false'
+      APP_HISTORY_BATCH_BACKFILL_ENABLED: 'false'
+      APP_SOLIS_BATCH_BACKFILL_ENABLED: 'false'
+      APP_HISTORY_BACKFILL_ENABLED: 'false'
+    defaults:
+      run:
+        working-directory: backend/monitoring
+    steps:
+      - name: Recuperer le code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Installer Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17.0.15+6'
+          cache: maven
+          cache-dependency-path: backend/monitoring/pom.xml
+      - name: Tester et generer le JAR
+        run: bash ./mvnw --batch-mode --no-transfer-progress clean verify
+      - name: Conserver les rapports de tests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-tests-${{ github.run_number }}
+          path: backend/monitoring/target/surefire-reports/
+          retention-days: 7
+      - name: Conserver le JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jar-${{ github.sha }}
+          path: backend/monitoring/target/*.jar
+          if-no-files-found: error
+          retention-days: 7
+
+  frontend:
+    name: Frontend - tests et build web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: monitoring
+    steps:
+      - name: Recuperer le code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Installer Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.35.4'
+          cache: true
+      - name: Installer les dependances
+        run: flutter pub get --enforce-lockfile
+      - name: Executer les tests
+        run: flutter test
+      - name: Generer le frontend web
+        run: flutter build web --release --base-href /
+      - name: Conserver le frontend
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-web-${{ github.sha }}
+          path: monitoring/build/web/
+          if-no-files-found: error
+          retention-days: 7

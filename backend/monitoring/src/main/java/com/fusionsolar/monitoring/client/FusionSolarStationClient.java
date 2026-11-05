@@ -19,6 +19,7 @@ import com.fusionsolar.monitoring.exception.FusionSolarApiException;
 import com.fusionsolar.monitoring.service.HuaweiSessionManager;
 import com.fusionsolar.monitoring.service.huawei.HuaweiAccountDirectory;
 import com.fusionsolar.monitoring.service.huawei.HuaweiApiRateLimiter;
+import com.fusionsolar.monitoring.service.huawei.HuaweiApiDeferredException;
 import com.fusionsolar.monitoring.service.huawei.HuaweiAccountDirectory.HuaweiAccount;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -49,7 +50,7 @@ public class FusionSolarStationClient {
 
 
     private static final long NETWORK_RETRY_DELAY_MS = 3_000L;
-    private static final long AUTH_RETRY_DELAY_MS = 1_000L;
+    private static final long AUTH_RETRY_MIN_DELAY_MS = 60_000L;
 
     private final HuaweiAccountDirectory huaweiAccountDirectory;
     private final HuaweiSessionManager sessionManager;
@@ -58,8 +59,36 @@ public class FusionSolarStationClient {
     private final ObjectMapper objectMapper = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate = createRestTemplate();
 
+    private static RestTemplate createRestTemplate() {
+        var factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(15000);
+        factory.setReadTimeout(30000);
+        return new RestTemplate(factory);
+    }
+
+
+    @org.springframework.beans.factory.annotation.Value("${app.history-batch-backfill.huawei-report-daily-call-limit:22}")
+    private int reportDailyLimit;
+
+    private final ThreadLocal<Boolean> backgroundCollection = ThreadLocal.withInitial(() -> false);
+
+    public void prioritizeStateCollection(String accountKey) {
+        rateLimiter.prioritizeStates(accountKey);
+    }
+
+    public StationListResponse getStationsPageForSync(String accountKey, int pageNo) {
+        backgroundCollection.set(true);
+        try { return getStationsPage(accountKey, pageNo); }
+        finally { backgroundCollection.remove(); }
+    }
+
+    public StationRealKpiResponse getStationRealKpiForSync(String accountKey, List<String> codes) {
+        backgroundCollection.set(true);
+        try { return getStationRealKpi(accountKey, codes); }
+        finally { backgroundCollection.remove(); }
+    }
 
     public StationListResponse getStationsPage(int pageNo) {
         return getStationsPage(huaweiAccountDirectory.primaryAccountKey(), pageNo);
@@ -222,10 +251,14 @@ public class FusionSolarStationClient {
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
                 session = sessionManager.getSession(effectiveAccountKey);
-                rateLimiter.awaitSlot(effectiveAccountKey, endpoint);
+                reserveProviderSlot(effectiveAccountKey, endpoint);
 
+                if (isHistoryEndpoint(endpoint) && !inventoryBudget.tryConsumeDaily(
+                        "HUAWEI", rateLimiter.budgetScope(effectiveAccountKey), endpoint,
+                        reportDailyLimit, java.time.ZoneId.of("Africa/Tunis"))) {
+                    throw new HuaweiApiDeferredException("Huawei daily report budget exhausted", 3600000L);
+                }
                 log.info("Calling FusionSolar URL: {} account={}", url, effectiveAccountKey);
-
                 T response = doPost(url, endpoint, body, responseType, session);
                 rateLimiter.registerSuccess(effectiveAccountKey, endpoint);
                 return response;
@@ -243,8 +276,12 @@ public class FusionSolarStationClient {
 
                 if (e.isAuthError()) {
                     sessionManager.invalidateSession(effectiveAccountKey, session);
-                    sleepQuietly(AUTH_RETRY_DELAY_MS * attempt);
-                    continue;
+                    throw new HuaweiApiDeferredException(
+                            "FusionSolar session refresh scheduled after auth error on "
+                                    + endpoint + " account=" + effectiveAccountKey,
+                            AUTH_RETRY_MIN_DELAY_MS,
+                            e
+                    );
                 }
 
                 if (e.isRateLimit()) {
@@ -270,8 +307,12 @@ public class FusionSolarStationClient {
 
                 if (isAuthError(e)) {
                     sessionManager.invalidateSession(effectiveAccountKey, session);
-                    sleepQuietly(AUTH_RETRY_DELAY_MS * attempt);
-                    continue;
+                    throw new HuaweiApiDeferredException(
+                            "FusionSolar session refresh scheduled after HTTP auth error on "
+                                    + endpoint + " account=" + effectiveAccountKey,
+                            AUTH_RETRY_MIN_DELAY_MS,
+                            e
+                    );
                 }
 
                 if (isRateLimitError(e)) {
@@ -289,6 +330,15 @@ public class FusionSolarStationClient {
                         "FusionSolar HTTP error " + e.getStatusCode().value() + " on " + endpoint,
                         e
                 );
+
+            } catch (HuaweiApiDeferredException e) {
+                log.info(
+                        "FusionSolar call deferred without blocking endpoint={} account={} retryAfterMs={}",
+                        endpoint,
+                        effectiveAccountKey,
+                        e.getRetryAfterMs()
+                );
+                throw e;
 
             } catch (ResourceAccessException e) {
                 log.warn("FusionSolar network error on {} account={} attempt={}: {}", endpoint, effectiveAccountKey, attempt, e.getMessage());
@@ -319,8 +369,53 @@ public class FusionSolarStationClient {
                 : new RuntimeException("Unable to call FusionSolar on " + endpoint);
     }
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.fusionsolar.monitoring.service.sync.PersistentRateBudgetService inventoryBudget;
+
+    private void reserveProviderSlot(String accountKey, String endpoint) {
+        if (backgroundCollection.get() && !isHistoryEndpoint(endpoint)) {
+            rateLimiter.awaitSlot(accountKey, endpoint);
+            reserveInventoryBudget(accountKey, endpoint);
+            return;
+        }
+
+        long retryAfterMs = rateLimiter.tryReserveSlot(accountKey, endpoint);
+        if (retryAfterMs > 0L) {
+            throw new HuaweiApiDeferredException(
+                    "FusionSolar live call deferred endpoint=" + endpoint
+                            + " account=" + accountKey
+                            + " retryAfterMs=" + retryAfterMs,
+                    retryAfterMs
+            );
+        }
+        reserveInventoryBudget(accountKey, endpoint);
+    }
+
+    private void reserveInventoryBudget(String accountKey, String endpoint) {
+        if ("/thirdData/stations".equals(endpoint) && inventoryBudget != null &&
+                !inventoryBudget.tryConsumeDaily("HUAWEI", accountKey, endpoint, 24, java.time.ZoneId.of("Africa/Tunis"))) {
+            throw new HuaweiApiDeferredException("Huawei inventory daily budget exhausted", 86400000L);
+        }
+
+    }
+
+    private boolean isHistoryEndpoint(String endpoint) {
+        return "/thirdData/getKpiStationHour".equals(endpoint)
+                || "/thirdData/getKpiStationDay".equals(endpoint)
+                || "/thirdData/getKpiStationMonth".equals(endpoint)
+                || "/thirdData/getKpiStationYear".equals(endpoint);
+    }
+
     public long huaweiWaitMsBeforeNextHistoryCall(String accountKey) {
         return rateLimiter.waitMsBeforeNextSlot(effectiveAccountKey(accountKey), "/thirdData/getKpiStationHour");
+    }
+
+    public long huaweiWaitMsBeforeCall(String accountKey, String endpoint) {
+        return rateLimiter.waitMsBeforeNextSlot(effectiveAccountKey(accountKey), endpoint);
+    }
+
+    public boolean hasUsableHuaweiSession(String accountKey) {
+        return sessionManager.hasUsableSession(effectiveAccountKey(accountKey));
     }
 
     public boolean isHuaweiAccountCoolingDown(String accountKey) {

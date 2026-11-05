@@ -38,6 +38,18 @@ public class HuaweiHistorySyncService {
     @Value("${app.huawei-sync.min-history-provider-delay-ms:15000}")
     private long minHistoryProviderDelayMs;
 
+    @Value("${app.history-batch-backfill.max-lookback-months:${app.history-backfill.max-lookback-months:120}}")
+    private int maxLookbackMonths;
+
+    @Value("${app.history-batch-backfill.incomplete-month-refresh-ms:${app.history-backfill.incomplete-month-refresh-ms:21600000}}")
+    private long incompleteMonthRefreshMs;
+
+    @Value("${app.history-batch-backfill.invalid-value-month-refresh-ms:${app.history-backfill.invalid-value-month-refresh-ms:21600000}}")
+    private long invalidValueMonthRefreshMs;
+
+    @Value("${app.history-batch-backfill.month-finalization-grace-hours:${app.history-backfill.month-finalization-grace-hours:6}}")
+    private int monthFinalizationGraceHours;
+
     private final Object historyProviderLock = new Object();
     private Instant lastHistoryProviderCallAt = Instant.EPOCH;
 
@@ -46,6 +58,20 @@ public class HuaweiHistorySyncService {
     }
 
     public List<HistoryPointDto> getHistory(
+            SiteDocument site,
+            String type,
+            String value,
+            boolean forceRefresh
+    ) {
+        String key = "Huawei|" + site.getProviderAccountGroup() + "|" + site.getSiteCode() + "|" + type + "|" + value;
+        return HistorySingleFlight.execute(key, () -> loadHistory(site, type, value, forceRefresh));
+    }
+
+    private List<HistoryPointDto> loadHistory(SiteDocument site, String type, String value) {
+        return getHistory(site, type, value, false);
+    }
+
+    private List<HistoryPointDto> loadHistory(
             SiteDocument site,
             String type,
             String value,
@@ -72,14 +98,19 @@ public class HuaweiHistorySyncService {
                 ))
                 .orElse(null);
 
-        if (!forceRefresh && isHistoryFresh(cached, granularity, value)) {
-            return safePoints(cached);
+        if (!forceRefresh && isHistoryFresh(site, cached, granularity, value)) {
+            return clampMonthPoints(
+                    site,
+                    granularity,
+                    value,
+                    safePoints(cached)
+            );
         }
 
         try {
             waitForHistoryProviderSlot();
 
-            List<HistoryPointDto> points = huaweiMonitoringProvider.getHistory(
+            List<HistoryPointDto> loadedPoints = huaweiMonitoringProvider.getHistory(
                     site.getSiteCode(),
                     type,
                     value
@@ -87,20 +118,49 @@ public class HuaweiHistorySyncService {
 
             Instant now = Instant.now();
 
+            List<HistoryPointDto> mergedPoints = HistoryBackfillCompletenessSupport.mergeHistoryPoints(
+                    cached != null ? cached.getPoints() : List.of(),
+                    loadedPoints,
+                    granularity,
+                    TUNIS_ZONE
+            );
+
+            List<HistoryPointDto> pointsToSave = clampMonthPoints(
+                    site,
+                    granularity,
+                    value,
+                    mergedPoints
+            );
+
             SiteHistoryDocument document = siteMongoMapper.toSiteHistoryDocument(
                     site.getBrand(),
                     site.getSiteCode(),
                     granularity,
                     value,
-                    points,
+                    pointsToSave,
                     cached,
                     now
             );
+
             document.setProviderAccountKey(accountKey);
             document.setProviderAccountGroup(accountGroup);
 
+            if (loadedPoints != null && !loadedPoints.isEmpty()) {
+                HistoryCollectionStateSupport.markSuccessful(document, now);
+            }
+
             siteHistoryRepository.save(document);
-            return points;
+
+            logMonthSaveStatus(
+                    site,
+                    granularity,
+                    value,
+                    loadedPoints,
+                    pointsToSave,
+                    document
+            );
+
+            return pointsToSave;
 
         } catch (Exception e) {
             if (forceRefresh) {
@@ -123,10 +183,24 @@ public class HuaweiHistorySyncService {
                         site.getSiteCode(),
                         e.getMessage()
                 );
-                return safePoints(cached);
+
+                return clampMonthPoints(
+                        site,
+                        granularity,
+                        value,
+                        safePoints(cached)
+                );
             }
 
-            throw e;
+            throw new RuntimeException(
+                    "Huawei history unavailable for site="
+                            + site.getSiteCode()
+                            + ", type="
+                            + type
+                            + ", value="
+                            + value,
+                    e
+            );
         }
     }
 
@@ -159,24 +233,39 @@ public class HuaweiHistorySyncService {
         try {
             waitForHistoryProviderSlot();
 
-            List<HistoryPointDto> points = huaweiMonitoringProvider.getYearlyHistory(site.getSiteCode());
+            List<HistoryPointDto> loadedPoints =
+                    huaweiMonitoringProvider.getYearlyHistory(site.getSiteCode());
 
             Instant now = Instant.now();
+
+            List<HistoryPointDto> pointsToSave =
+                    HistoryBackfillCompletenessSupport.mergeHistoryPoints(
+                            cached != null ? cached.getPoints() : List.of(),
+                            loadedPoints,
+                            HistoryGranularity.YEARLY,
+                            TUNIS_ZONE
+                    );
 
             SiteHistoryDocument document = siteMongoMapper.toSiteHistoryDocument(
                     site.getBrand(),
                     site.getSiteCode(),
                     HistoryGranularity.YEARLY,
                     bucket,
-                    points,
+                    pointsToSave,
                     cached,
                     now
             );
+
             document.setProviderAccountKey(accountKey);
             document.setProviderAccountGroup(accountGroup);
 
+            if (loadedPoints != null && !loadedPoints.isEmpty()) {
+                HistoryCollectionStateSupport.markSuccessful(document, now);
+            }
+
             siteHistoryRepository.save(document);
-            return points;
+
+            return pointsToSave;
 
         } catch (Exception e) {
             if (cached != null) {
@@ -185,27 +274,102 @@ public class HuaweiHistorySyncService {
                         site.getSiteCode(),
                         e.getMessage()
                 );
+
                 return safePoints(cached);
             }
 
-            throw e;
+            throw new RuntimeException(
+                    "Huawei yearly history unavailable for site=" + site.getSiteCode(),
+                    e
+            );
         }
     }
 
+    private List<HistoryPointDto> clampMonthPoints(
+            SiteDocument site,
+            HistoryGranularity granularity,
+            String bucket,
+            List<HistoryPointDto> points
+    ) {
+        List<HistoryPointDto> safe = points != null ? points : List.of();
+
+        if (granularity != HistoryGranularity.MONTH) {
+            return safe;
+        }
+
+        return HistoryBackfillCompletenessSupport.clampMonthPointsToExpectedWindow(
+                site,
+                bucket,
+                safe,
+                LocalDate.now(TUNIS_ZONE),
+                maxLookbackMonths,
+                TUNIS_ZONE
+        );
+    }
+
+    private void logMonthSaveStatus(
+            SiteDocument site,
+            HistoryGranularity granularity,
+            String bucket,
+            List<HistoryPointDto> loadedPoints,
+            List<HistoryPointDto> savedPoints,
+            SiteHistoryDocument document
+    ) {
+        if (granularity != HistoryGranularity.MONTH) {
+            return;
+        }
+
+        HistoryBackfillCompletenessSupport.MonthCompleteness completeness =
+                HistoryBackfillCompletenessSupport.inspectMonth(
+                        site,
+                        document,
+                        bucket,
+                        LocalDate.now(TUNIS_ZONE),
+                        maxLookbackMonths,
+                        TUNIS_ZONE
+                );
+
+        log.info(
+                "Huawei MONTH bucket saved site={} bucket={} loadedPoints={} savedPoints={} status={} collected={}/{} present={} missingDays={} zeroOrNullDays={} missingOrInvalid={} expectedRange={}..{}",
+                site.getSiteCode(),
+                bucket,
+                loadedPoints == null ? 0 : loadedPoints.size(),
+                savedPoints == null ? 0 : savedPoints.size(),
+                HistoryBackfillCompletenessSupport.monthStatusLabel(completeness),
+                completeness.collectedDays(),
+                completeness.expectedDays(),
+                completeness.presentDays(),
+                completeness.missingDays(),
+                completeness.invalidValueDays(),
+                completeness.missingOrInvalidDays(),
+                completeness.expectedStart(),
+                completeness.expectedEnd()
+        );
+    }
+
     private String accountGroupOf(SiteDocument site) {
-        if (site != null && site.getProviderAccountGroup() != null && !site.getProviderAccountGroup().isBlank()) {
+        if (site != null
+                && site.getProviderAccountGroup() != null
+                && !site.getProviderAccountGroup().isBlank()) {
             return site.getProviderAccountGroup().trim();
         }
-        if (site != null && site.getProviderAccountKey() != null && !site.getProviderAccountKey().isBlank()) {
+
+        if (site != null
+                && site.getProviderAccountKey() != null
+                && !site.getProviderAccountKey().isBlank()) {
             return site.getProviderAccountKey().trim();
         }
+
         return "primary";
     }
 
     private String accountKeyOf(SiteDocument site) {
-        if (site != null && site.getProviderAccountKey() != null && !site.getProviderAccountKey().isBlank()) {
+        if (site != null
+                && site.getProviderAccountKey() != null
+                && !site.getProviderAccountKey().isBlank()) {
             return site.getProviderAccountKey().trim();
         }
+
         return accountGroupOf(site);
     }
 
@@ -220,11 +384,7 @@ public class HuaweiHistorySyncService {
             long waitMs = minHistoryProviderDelayMs - elapsedMs;
 
             if (waitMs > 0) {
-                try {
-                    Thread.sleep(waitMs);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
+                sleep(waitMs);
             }
 
             lastHistoryProviderCallAt = Instant.now();
@@ -232,12 +392,29 @@ public class HuaweiHistorySyncService {
     }
 
     private boolean isHistoryFresh(
+            SiteDocument site,
             SiteHistoryDocument cached,
             HistoryGranularity granularity,
             String bucket
     ) {
         if (cached == null || cached.getLastSyncAt() == null) {
             return false;
+        }
+
+        if (granularity == HistoryGranularity.MONTH) {
+            return !HistoryBackfillCompletenessSupport.isMonthHistoryDue(
+                    site,
+                    cached,
+                    bucket,
+                    LocalDate.now(TUNIS_ZONE),
+                    maxLookbackMonths,
+                    86_400_000L,
+                    incompleteMonthRefreshMs,
+                    invalidValueMonthRefreshMs,
+                    CURRENT_MONTH_HISTORY_TTL_MS,
+                    monthFinalizationGraceHours,
+                    TUNIS_ZONE
+            );
         }
 
         if (!isCurrentBucket(granularity, bucket)) {
@@ -247,8 +424,7 @@ public class HuaweiHistorySyncService {
         long ttlMs = resolveTtlMs(granularity);
         Instant minAcceptedInstant = Instant.now().minusMillis(ttlMs);
 
-        return cached.getLastSyncAt().isAfter(minAcceptedInstant)
-                || cached.getLastSyncAt().equals(minAcceptedInstant);
+        return !cached.getLastSyncAt().isBefore(minAcceptedInstant);
     }
 
     private boolean isYearlyHistoryFresh(SiteHistoryDocument cached) {
@@ -258,8 +434,7 @@ public class HuaweiHistorySyncService {
 
         Instant minAcceptedInstant = Instant.now().minusMillis(YEARLY_HISTORY_TTL_MS);
 
-        return cached.getLastSyncAt().isAfter(minAcceptedInstant)
-                || cached.getLastSyncAt().equals(minAcceptedInstant);
+        return !cached.getLastSyncAt().isBefore(minAcceptedInstant);
     }
 
     private boolean isCurrentBucket(HistoryGranularity granularity, String bucket) {
@@ -285,6 +460,16 @@ public class HuaweiHistorySyncService {
     }
 
     private List<HistoryPointDto> safePoints(SiteHistoryDocument cached) {
-        return cached.getPoints() != null ? cached.getPoints() : List.of();
+        return cached != null && cached.getPoints() != null
+                ? cached.getPoints()
+                : List.of();
+    }
+
+    private void sleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 }

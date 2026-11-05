@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
-
 import '../../../app/routes/app_routes.dart';
 import '../../../app/theme/app_colors.dart';
 import '../../../core/utils/formatters.dart';
@@ -12,7 +11,6 @@ import '../controllers/sites_controller.dart';
 
 class SitesPage extends GetView<SitesController> {
   const SitesPage({super.key});
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -21,11 +19,12 @@ class SitesPage extends GetView<SitesController> {
         if (controller.isLoading.value && controller.sites.isEmpty) {
           return const LoadingState(label: 'Chargement des sites...');
         }
-
         if (controller.errorMessage.value != null && controller.sites.isEmpty) {
-          return ErrorState(message: controller.errorMessage.value!, onRetry: controller.load);
+          return ErrorState(
+            message: controller.errorMessage.value!,
+            onRetry: controller.load,
+          );
         }
-
         return CustomScrollView(
           slivers: [
             _SitesHeader(controller: controller),
@@ -48,9 +47,7 @@ class SitesPage extends GetView<SitesController> {
 
 class _SitesHeader extends StatelessWidget {
   const _SitesHeader({required this.controller});
-
   final SitesController controller;
-
   @override
   Widget build(BuildContext context) {
     return SliverAppBar(
@@ -106,7 +103,9 @@ class _SitesHeader extends StatelessWidget {
             Obx(
               () => IconButton.filledTonal(
                 tooltip: 'Mettre à jour maintenant',
-                onPressed: controller.isRefreshing.value ? null : controller.refreshData,
+                onPressed: controller.isRefreshing.value
+                    ? null
+                    : controller.refreshData,
                 icon: controller.isRefreshing.value
                     ? const SizedBox(
                         width: 18,
@@ -125,9 +124,7 @@ class _SitesHeader extends StatelessWidget {
 
 class _FiltersCard extends StatelessWidget {
   const _FiltersCard({required this.controller});
-
   final SitesController controller;
-
   @override
   Widget build(BuildContext context) {
     return PremiumCard(
@@ -160,7 +157,8 @@ class _FiltersCard extends StatelessWidget {
             onChanged: (value) => controller.searchQuery.value = value,
             decoration: const InputDecoration(
               prefixIcon: Icon(Icons.search_rounded),
-              hintText: 'Rechercher un site, code, marque, zone ou gouvernorat...',
+              hintText:
+                  'Rechercher un site, code, marque, zone ou gouvernorat...',
             ),
           ),
           const SizedBox(height: 16),
@@ -169,13 +167,11 @@ class _FiltersCard extends StatelessWidget {
               final fullWidth = constraints.maxWidth;
               final wide = fullWidth >= 1180;
               final medium = fullWidth >= 760;
-
               final groupWidth = wide
                   ? (fullWidth - 24) / 3
                   : medium
-                      ? (fullWidth - 12) / 2
-                      : fullWidth;
-
+                  ? (fullWidth - 12) / 2
+                  : fullWidth;
               return Wrap(
                 spacing: 12,
                 runSpacing: 12,
@@ -194,14 +190,20 @@ class _FiltersCard extends StatelessWidget {
                               width: 150,
                               label: 'Zone',
                               value: controller.selectedZone.value,
-                              values: const ['ALL', 'Zone A', 'Zone B', 'Zone C'],
+                              values: const [
+                                'ALL',
+                                'Zone A',
+                                'Zone B',
+                                'Zone C',
+                              ],
                               labels: const {
                                 'ALL': 'Toutes',
                                 'Zone A': 'Zone A',
                                 'Zone B': 'Zone B',
                                 'Zone C': 'Zone C',
                               },
-                              onChanged: (value) => controller.setZoneFilter(value ?? 'ALL'),
+                              onChanged: (value) =>
+                                  controller.setZoneFilter(value ?? 'ALL'),
                             ),
                           ),
                           Obx(
@@ -215,7 +217,9 @@ class _FiltersCard extends StatelessWidget {
                                 'RT': 'RT',
                                 'GF': 'GF',
                               },
-                              onChanged: (value) => controller.selectedPlantType.value = value ?? 'ALL',
+                              onChanged: (value) =>
+                                  controller.selectedPlantType.value =
+                                      value ?? 'ALL',
                             ),
                           ),
                           Obx(
@@ -224,10 +228,10 @@ class _FiltersCard extends StatelessWidget {
                               label: 'Gouvernorat',
                               value: controller.selectedGovernor.value,
                               values: controller.availableGovernments,
-                              labels: const {
-                                'ALL': 'Tous',
-                              },
-                              onChanged: (value) => controller.selectedGovernor.value = value ?? 'ALL',
+                              labels: const {'ALL': 'Tous'},
+                              onChanged: (value) =>
+                                  controller.selectedGovernor.value =
+                                      value ?? 'ALL',
                             ),
                           ),
                         ],
@@ -262,7 +266,9 @@ class _FiltersCard extends StatelessWidget {
                                 'totalEnergy': 'kWh total',
                                 'installedPower': 'kWp',
                               },
-                              onChanged: (value) => controller.setSortBy(value ?? 'commissioningDate'),
+                              onChanged: (value) => controller.setSortBy(
+                                value ?? 'commissioningDate',
+                              ),
                             ),
                           ),
                           Obx(
@@ -275,7 +281,8 @@ class _FiltersCard extends StatelessWidget {
                                 'desc': 'Descendant',
                                 'asc': 'Ascendant',
                               },
-                              onChanged: (value) => controller.setSortDirection(value ?? 'desc'),
+                              onChanged: (value) =>
+                                  controller.setSortDirection(value ?? 'desc'),
                             ),
                           ),
                         ],
@@ -298,10 +305,10 @@ class _FiltersCard extends StatelessWidget {
                               label: 'Brand',
                               value: controller.selectedBrand.value,
                               values: ['ALL', ...controller.brands],
-                              labels: const {
-                                'ALL': 'Toutes',
-                              },
-                              onChanged: (value) => controller.selectedBrand.value = value ?? 'ALL',
+                              labels: const {'ALL': 'Toutes'},
+                              onChanged: (value) =>
+                                  controller.selectedBrand.value =
+                                      value ?? 'ALL',
                             ),
                           ),
                           Obx(
@@ -309,21 +316,32 @@ class _FiltersCard extends StatelessWidget {
                               width: 160,
                               label: 'Status',
                               value: controller.selectedStatus.value,
-                              values: const ['ALL', 'healthy', 'faulty', 'disconnected'],
+                              values: const [
+                                'ALL',
+                                'healthy',
+                                'faulty',
+                                'disconnected',
+                              ],
                               labels: const {
                                 'ALL': 'Tous',
                                 'healthy': 'Healthy',
                                 'faulty': 'Faulty',
                                 'disconnected': 'Offline',
                               },
-                              onChanged: (value) => controller.selectedStatus.value = value ?? 'ALL',
+                              onChanged: (value) =>
+                                  controller.selectedStatus.value =
+                                      value ?? 'ALL',
                             ),
                           ),
                           Obx(
                             () => FilterChip(
                               selected: controller.faultsOnly.value,
-                              onSelected: (value) => controller.faultsOnly.value = value,
-                              avatar: const Icon(Icons.error_outline_rounded, size: 18),
+                              onSelected: (value) =>
+                                  controller.faultsOnly.value = value,
+                              avatar: const Icon(
+                                Icons.error_outline_rounded,
+                                size: 18,
+                              ),
                               label: const Text('Défauts uniquement'),
                             ),
                           ),
@@ -347,11 +365,9 @@ class _FilterGroupCard extends StatelessWidget {
     required this.title,
     required this.child,
   });
-
   final IconData icon;
   final String title;
   final Widget child;
-
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -400,19 +416,18 @@ class _DropdownFilter extends StatelessWidget {
     required this.onChanged,
     this.labels = const {},
   });
-
   final double width;
   final String label;
   final String value;
   final List<String> values;
   final Map<String, String> labels;
   final ValueChanged<String?> onChanged;
-
   @override
   Widget build(BuildContext context) {
     final normalizedValues = values.toSet().toList();
-    final safeValue = normalizedValues.contains(value) ? value : normalizedValues.first;
-
+    final safeValue = normalizedValues.contains(value)
+        ? value
+        : normalizedValues.first;
     return SizedBox(
       width: width,
       child: DropdownButtonFormField<String>(
@@ -439,35 +454,86 @@ class _DropdownFilter extends StatelessWidget {
 
 class _SitesContent extends StatelessWidget {
   const _SitesContent({required this.controller});
-
   final SitesController controller;
-
   @override
   Widget build(BuildContext context) {
     return Obx(() {
       final sites = controller.filteredSites;
-
       if (sites.isEmpty) {
         return const PremiumCard(
           child: EmptyState(
             title: 'Aucun site trouvé',
-            message: 'Ajuste la recherche ou les filtres pour afficher les sites.',
+            message:
+                'Ajuste la recherche ou les filtres pour afficher les sites.',
             icon: Icons.search_off_rounded,
           ),
         );
       }
-
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: Text(
-              '${sites.length} sites affichés',
-              style: const TextStyle(
-                color: AppColors.mutedText,
-                fontWeight: FontWeight.w900,
-              ),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final counter = Text(
+                  '${sites.length} sites affichés',
+                  style: const TextStyle(
+                    color: AppColors.mutedText,
+                    fontWeight: FontWeight.w900,
+                  ),
+                );
+                final exportButton = Obx(
+                  () => Tooltip(
+                    message:
+                        'Télécharger les sites affichés, avec les filtres et le tri actuels',
+                    child: FilledButton.icon(
+                      onPressed: controller.isExporting.value
+                          ? null
+                          : controller.exportFilteredSites,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: AppColors.deepTeal,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 16,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      icon: controller.isExporting.value
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.download_rounded, size: 20),
+                      label: Text(
+                        controller.isExporting.value
+                            ? 'Export en cours...'
+                            : 'Exporter Excel',
+                      ),
+                    ),
+                  ),
+                );
+                if (constraints.maxWidth < 480) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      counter,
+                      const SizedBox(height: 12),
+                      exportButton,
+                    ],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: counter),
+                    exportButton,
+                  ],
+                );
+              },
             ),
           ),
           const SizedBox(height: 12),
@@ -476,12 +542,11 @@ class _SitesContent extends StatelessWidget {
               final columns = constraints.maxWidth >= 1280
                   ? 3
                   : constraints.maxWidth >= 820
-                      ? 2
-                      : 1;
-
+                  ? 2
+                  : 1;
               final spacing = 16.0;
-              final width = (constraints.maxWidth - spacing * (columns - 1)) / columns;
-
+              final width =
+                  (constraints.maxWidth - spacing * (columns - 1)) / columns;
               return Wrap(
                 spacing: spacing,
                 runSpacing: spacing,
@@ -502,17 +567,12 @@ class _SitesContent extends StatelessWidget {
 
 class _SiteCard extends StatelessWidget {
   const _SiteCard({required this.site});
-
   final SiteSummary site;
-
   @override
   Widget build(BuildContext context) {
     return PremiumCard(
       onTap: () => Get.toNamed(
-        AppRoutes.siteDetailsPath(
-          brand: site.brand,
-          siteCode: site.siteCode,
-        ),
+        AppRoutes.siteDetailsPath(brand: site.brand, siteCode: site.siteCode),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -570,7 +630,10 @@ class _SiteCard extends StatelessWidget {
             children: [
               _InfoChip(label: 'Brand', value: site.brand),
               const SizedBox(width: 8),
-              _InfoChip(label: 'Power', value: Formatters.power(site.installedPowerKw)),
+              _InfoChip(
+                label: 'Power',
+                value: Formatters.power(site.installedPowerKw),
+              ),
             ],
           ),
           const SizedBox(height: 16),
@@ -612,14 +675,9 @@ class _SiteCard extends StatelessWidget {
 }
 
 class _EnergyBlock extends StatelessWidget {
-  const _EnergyBlock({
-    required this.label,
-    required this.value,
-  });
-
+  const _EnergyBlock({required this.label, required this.value});
   final String label;
   final String value;
-
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -651,14 +709,9 @@ class _EnergyBlock extends StatelessWidget {
 }
 
 class _InfoChip extends StatelessWidget {
-  const _InfoChip({
-    required this.label,
-    required this.value,
-  });
-
+  const _InfoChip({required this.label, required this.value});
   final String label;
   final String value;
-
   @override
   Widget build(BuildContext context) {
     return Expanded(

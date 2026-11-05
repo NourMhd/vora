@@ -3,6 +3,7 @@ package com.fusionsolar.monitoring.service;
 import com.fusionsolar.monitoring.client.FusionSolarAuthClient;
 import com.fusionsolar.monitoring.dto.HuaweiSession;
 import com.fusionsolar.monitoring.service.huawei.HuaweiAccountDirectory;
+import com.fusionsolar.monitoring.service.huawei.HuaweiApiDeferredException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -24,6 +25,11 @@ public class HuaweiSessionManager {
 
     private final Map<String, AccountSessionState> sessionsByAccount = new ConcurrentHashMap<>();
 
+    public boolean hasUsableSession(String accountKey) {
+        AccountSessionState state = sessionsByAccount.get(effectiveAccountKey(accountKey));
+        return state != null && !isExpired(state);
+    }
+
     public HuaweiSession getSession() {
         return getSession(huaweiAccountDirectory.primaryAccountKey());
     }
@@ -39,8 +45,7 @@ public class HuaweiSessionManager {
                 session = state.currentSession;
 
                 if (session == null || isExpired(state)) {
-                    awaitLoginWindow(state);
-                    state.currentSession = loginAndBuildSession(effectiveKey);
+                    state.currentSession = loginWithDeferredAttemptRecovery(effectiveKey, state);
                     state.lastLoginTime = System.currentTimeMillis();
                 }
 
@@ -60,8 +65,7 @@ public class HuaweiSessionManager {
         AccountSessionState state = sessionsByAccount.computeIfAbsent(effectiveKey, key -> new AccountSessionState());
 
         synchronized (state.lock) {
-            awaitLoginWindow(state);
-            state.currentSession = loginAndBuildSession(effectiveKey);
+            state.currentSession = loginWithDeferredAttemptRecovery(effectiveKey, state);
             state.lastLoginTime = System.currentTimeMillis();
             return state.currentSession;
         }
@@ -102,23 +106,31 @@ public class HuaweiSessionManager {
     }
 
 
-    private void awaitLoginWindow(AccountSessionState state) {
+    private void reserveLoginAttemptOrDefer(String accountKey, AccountSessionState state) {
         long now = System.currentTimeMillis();
         long elapsed = now - state.lastLoginAttemptAt;
         long waitMs = Math.max(60_000L, minLoginIntervalMillis) - elapsed;
 
         if (state.lastLoginAttemptAt > 0L && waitMs > 0L) {
-            sleepQuietly(waitMs);
+            throw new HuaweiApiDeferredException(
+                    "FusionSolar relogin pending for account=" + accountKey
+                            + " retryAfterMs=" + waitMs,
+                    waitMs
+            );
         }
 
-        state.lastLoginAttemptAt = System.currentTimeMillis();
+        state.lastLoginAttemptAt = now;
     }
 
-    private void sleepQuietly(long millis) {
+    private HuaweiSession loginWithDeferredAttemptRecovery(String accountKey, AccountSessionState state) {
+        long previousAttempt = state.lastLoginAttemptAt;
+        reserveLoginAttemptOrDefer(accountKey, state);
         try {
-            Thread.sleep(millis);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            return loginAndBuildSession(accountKey);
+        } catch (HuaweiApiDeferredException deferred) {
+            // Auth client's guard rejected before HTTP: do not invent a login attempt.
+            state.lastLoginAttemptAt = previousAttempt;
+            throw deferred;
         }
     }
 

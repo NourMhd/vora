@@ -51,8 +51,9 @@ public class SiteHistoryBackfillService {
     private final ObjectProvider<SolisHistorySyncService> solisHistorySyncServiceProvider;
     private final ObjectProvider<GrowattHistorySyncService> growattHistorySyncServiceProvider;
 
-    private final AtomicBoolean running = new AtomicBoolean(false);
-    private final AtomicInteger nextSiteIndex = new AtomicInteger(0);
+    private final java.util.Map<Brand, AtomicBoolean> runningByBrand = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.Map<Brand, AtomicInteger> cursors = new java.util.concurrent.ConcurrentHashMap<>();
+    private final AtomicInteger priorityTurn = new AtomicInteger();
 
     @Value("${app.history-backfill.enabled:true}")
     private boolean enabled;
@@ -66,14 +67,26 @@ public class SiteHistoryBackfillService {
     @Value("${app.history-backfill.empty-history-retry-ms:86400000}")
     private long emptyHistoryRetryMs;
 
+    @Value("${app.history-backfill.empty-history-max-retry-ms:604800000}")
+    private long emptyHistoryMaxRetryMs;
+
+    @Value("${app.history-backfill.empty-confirmed-after-attempts:3}")
+    private int emptyConfirmedAfterAttempts;
+
     @Value("${app.history-backfill.max-lookback-months:120}")
     private int maxLookbackMonths;
 
     @Value("${app.history-backfill.current-day-refresh-ms:900000}")
     private long currentDayRefreshMs;
 
-    @Value("${app.history-backfill.current-month-refresh-ms:3600000}")
+    @Value("${app.history-backfill.current-month-refresh-ms:21600000}")
     private long currentMonthRefreshMs;
+
+    @Value("${app.history-backfill.incomplete-month-refresh-ms:21600000}")
+    private long incompleteMonthRefreshMs;
+
+    @Value("${app.history-backfill.month-finalization-grace-hours:6}")
+    private int monthFinalizationGraceHours;
 
     @Value("${app.history-backfill.current-year-refresh-ms:21600000}")
     private long currentYearRefreshMs;
@@ -88,6 +101,9 @@ public class SiteHistoryBackfillService {
     @Value("${app.history-backfill.historic-day-lookback-days:30}")
     private int historicDayLookbackDays;
 
+    @Value("${app.history-backfill.solis-year-backfill-enabled:false}")
+    private boolean solisYearBackfillEnabled;
+
     /**
      * Quand true, Solis MONTH/YEAR est traité par SolisBatchHistoryBackfillService.
      * Ce worker garde donc surtout Solis DAY et Growatt.
@@ -95,34 +111,27 @@ public class SiteHistoryBackfillService {
     @Value("${app.solis-batch-backfill.enabled:true}")
     private boolean solisBatchBackfillEnabled;
 
-    @Scheduled(
-            initialDelayString = "${app.history-backfill.initial-delay-ms:300000}",
-            fixedDelayString = "${app.history-backfill.fixed-delay-ms:60000}"
-    )
-    public void backfillMissingHistories() {
-        if (!enabled) {
-            return;
-        }
+    @Scheduled(initialDelayString = "${app.history-backfill.initial-delay-ms:120000}",
+            fixedDelayString = "${app.history-backfill.fixed-delay-ms:1000}", scheduler = "solisHistoryScheduler")
+    public void backfillMissingHistories() { backfillBrand(Brand.SOLIS); }
 
-        if (!running.compareAndSet(false, true)) {
-            return;
-        }
+    @Scheduled(initialDelayString = "${app.history-backfill.initial-delay-ms:120000}",
+            fixedDelayString = "${app.history-backfill.fixed-delay-ms:1000}", scheduler = "growattHistoryScheduler")
+    public void backfillGrowattHistories() { backfillBrand(Brand.GROWATT); }
 
-        try {
-            int callsDone = runOnePass();
-
-            if (callsDone > 0) {
-                log.info("History backfill pass finished: {} provider call(s)", callsDone);
-            }
-        } finally {
-            running.set(false);
-        }
+    private void backfillBrand(Brand brand) {
+        AtomicBoolean running = runningByBrand.computeIfAbsent(brand, key -> new AtomicBoolean());
+        if (!enabled || !running.compareAndSet(false, true)) return;
+        try { runOnePass(brand); }
+        finally { running.set(false); }
     }
 
-    private int runOnePass() {
+    private int runOnePass(Brand brand) {
+        AtomicInteger nextSiteIndex = cursors.computeIfAbsent(brand, key -> new AtomicInteger());
         List<SiteDocument> sites = siteRepository.findAllByOrderBySiteNameAsc()
                 .stream()
                 .filter(this::isEligibleSite)
+                .filter(site -> site.getBrand() == brand)
                 .sorted(Comparator.comparing(
                         site -> site.getSiteName() == null ? "" : site.getSiteName(),
                         String.CASE_INSENSITIVE_ORDER
@@ -186,7 +195,9 @@ public class SiteHistoryBackfillService {
          */
         String todayBucket = today.toString();
 
-        if (isMissingOrExpiredEmpty(site, HistoryGranularity.DAY, todayBucket)) {
+        boolean recentFirst = Math.floorMod(priorityTurn.getAndIncrement(), 2) == 0;
+        boolean todayDue = isMissingOrExpiredEmpty(site, HistoryGranularity.DAY, todayBucket);
+        if (recentFirst && todayDue) {
             return Optional.of(new BackfillTask(site, "day", todayBucket, HistoryGranularity.DAY));
         }
 
@@ -195,35 +206,37 @@ public class SiteHistoryBackfillService {
 
         if (!solisMonthYearHandledByBatch) {
             /*
-             * 2) YEAR avant MONTH.
-             * Pour Growatt, l'année courante est maintenant sécurisée:
-             * l'appel finit à aujourd'hui et non au 31/12.
+             * 2) MONTH avant YEAR pour Solis.
+             * Règle métier: les KPI jour / comparaison / alertes / IP utilisent MONTH en kWh.
+             * YEAR reste utile pour les courbes annuelles, mais il ne doit pas retarder
+             * la réparation des productions journalières.
              */
-            for (int year = lastMonth.getYear(); year >= firstMonth.getYear(); year--) {
-                String bucket = String.valueOf(year);
-
-                if (isMissingOrExpiredEmpty(site, HistoryGranularity.YEAR, bucket)) {
-                    return Optional.of(new BackfillTask(site, "year", bucket, HistoryGranularity.YEAR));
-                }
-            }
-
-            /*
-             * 3) MONTH.
-             * Pour Growatt, le mois courant est maintenant sécurisé:
-             * l'appel finit à aujourd'hui et non à la fin du mois.
-             */
-            YearMonth cursor = lastMonth;
-
-            while (!cursor.isBefore(firstMonth)) {
-                String bucket = cursor.toString();
-
-                if (isMissingOrExpiredEmpty(site, HistoryGranularity.MONTH, bucket)) {
-                    return Optional.of(new BackfillTask(site, "month", bucket, HistoryGranularity.MONTH));
+            if (site.getBrand() == Brand.SOLIS) {
+                Optional<BackfillTask> monthTask = nextMonthBackfillTask(site, firstMonth, lastMonth);
+                if (monthTask.isPresent()) {
+                    return monthTask;
                 }
 
-                cursor = cursor.minusMonths(1);
+                if (solisYearBackfillEnabled) {
+                    Optional<BackfillTask> yearTask = nextYearBackfillTask(site, firstMonth, lastMonth);
+                    if (yearTask.isPresent()) {
+                        return yearTask;
+                    }
+                }
+            } else {
+                Optional<BackfillTask> yearTask = nextYearBackfillTask(site, firstMonth, lastMonth);
+                if (yearTask.isPresent()) {
+                    return yearTask;
+                }
+
+                Optional<BackfillTask> monthTask = nextMonthBackfillTask(site, firstMonth, lastMonth);
+                if (monthTask.isPresent()) {
+                    return monthTask;
+                }
             }
         }
+
+        if (todayDue) return Optional.of(new BackfillTask(site, "day", todayBucket, HistoryGranularity.DAY));
 
         /*
          * 4) DAY historique.
@@ -253,6 +266,42 @@ public class SiteHistoryBackfillService {
 
                 dayCursor = dayCursor.minusDays(1);
             }
+        }
+
+        return Optional.empty();
+    }
+
+    private Optional<BackfillTask> nextYearBackfillTask(
+            SiteDocument site,
+            YearMonth firstMonth,
+            YearMonth lastMonth
+    ) {
+        for (int year = lastMonth.getYear(); year >= firstMonth.getYear(); year--) {
+            String bucket = String.valueOf(year);
+
+            if (isMissingOrExpiredEmpty(site, HistoryGranularity.YEAR, bucket)) {
+                return Optional.of(new BackfillTask(site, "year", bucket, HistoryGranularity.YEAR));
+            }
+        }
+
+        return Optional.empty();
+    }
+
+    private Optional<BackfillTask> nextMonthBackfillTask(
+            SiteDocument site,
+            YearMonth firstMonth,
+            YearMonth lastMonth
+    ) {
+        YearMonth cursor = lastMonth;
+
+        while (!cursor.isBefore(firstMonth)) {
+            String bucket = cursor.toString();
+
+            if (isMissingOrExpiredEmpty(site, HistoryGranularity.MONTH, bucket)) {
+                return Optional.of(new BackfillTask(site, "month", bucket, HistoryGranularity.MONTH));
+            }
+
+            cursor = cursor.minusMonths(1);
         }
 
         return Optional.empty();
@@ -292,11 +341,19 @@ public class SiteHistoryBackfillService {
                 )
                 .orElse(null);
 
+        if (granularity == HistoryGranularity.MONTH) {
+            return isMonthBucketDueWithLog(site, document, bucket);
+        }
+
         if (document == null) {
             return true;
         }
 
         if (document.getPoints() != null && !document.getPoints().isEmpty()) {
+            if (site.getBrand() == Brand.SOLIS && looksLikeSolisUnscopedHistory(document.getPoints())) {
+                return true;
+            }
+
             return isCurrentRefreshDue(document, granularity, bucket);
         }
 
@@ -304,10 +361,127 @@ public class SiteHistoryBackfillService {
             return true;
         }
 
-        Instant retryAfter = document.getLastSyncAt()
-                .plusMillis(Math.max(60_000L, emptyHistoryRetryMs));
+        Instant retryAfter = document.getNextRetryAt() != null
+                ? document.getNextRetryAt()
+                : document.getLastSyncAt().plusMillis(Math.max(60_000L, emptyHistoryRetryMs));
 
         return !Instant.now().isBefore(retryAfter);
+    }
+
+    private boolean isMonthBucketDueWithLog(
+            SiteDocument site,
+            SiteHistoryDocument document,
+            String bucket
+    ) {
+        LocalDate today = LocalDate.now(TUNIS_ZONE);
+        HistoryBackfillCompletenessSupport.MonthCompleteness completeness =
+                HistoryBackfillCompletenessSupport.inspectMonth(
+                        site,
+                        document,
+                        bucket,
+                        today,
+                        maxLookbackMonths,
+                        TUNIS_ZONE
+                );
+
+        boolean due = HistoryBackfillCompletenessSupport.isMonthHistoryDue(
+                site,
+                document,
+                bucket,
+                today,
+                maxLookbackMonths,
+                emptyHistoryRetryMs,
+                incompleteMonthRefreshMs,
+                incompleteMonthRefreshMs,
+                currentMonthRefreshMs,
+                monthFinalizationGraceHours,
+                TUNIS_ZONE
+        );
+
+        if (due) {
+            log.info(
+                    "History MONTH bucket due brand={} site={} bucket={} status={} collected={}/{} present={} missingDays={} zeroOrNullDays={} missingOrInvalid={} expectedRange={}..{} lastSyncAt={} reason={}",
+                    site.getBrand(),
+                    site.getSiteCode(),
+                    bucket,
+                    HistoryBackfillCompletenessSupport.monthStatusLabel(completeness),
+                    completeness.collectedDays(),
+                    completeness.expectedDays(),
+                    completeness.presentDays(),
+                    completeness.missingDays(),
+                    completeness.invalidValueDays(),
+                    completeness.missingOrInvalidDays(),
+                    completeness.expectedStart(),
+                    completeness.expectedEnd(),
+                    document != null ? document.getLastSyncAt() : null,
+                    monthDueReason(document, completeness, bucket)
+            );
+        } else if (completeness.expectedDays() > 0) {
+            log.debug(
+                    "History MONTH bucket OK brand={} site={} bucket={} collected={}/{} expectedRange={}..{} lastSyncAt={}",
+                    site.getBrand(),
+                    site.getSiteCode(),
+                    bucket,
+                    completeness.collectedDays(),
+                    completeness.expectedDays(),
+                    completeness.expectedStart(),
+                    completeness.expectedEnd(),
+                    document != null ? document.getLastSyncAt() : null
+            );
+        }
+
+        return due;
+    }
+
+    private String monthDueReason(
+            SiteHistoryDocument document,
+            HistoryBackfillCompletenessSupport.MonthCompleteness completeness,
+            String bucket
+    ) {
+        if (document == null) {
+            return "MISSING_BUCKET";
+        }
+
+        if (document.getPoints() == null || document.getPoints().isEmpty()) {
+            return "EMPTY_BUCKET";
+        }
+
+        if (completeness.missingDays() > 0 && completeness.invalidValueDays() > 0) {
+            return "MISSING_DAYS_AND_ZERO_OR_NULL_VALUES";
+        }
+
+        if (completeness.missingDays() > 0) {
+            return "MISSING_DAYS";
+        }
+
+        if (completeness.invalidValueDays() > 0) {
+            return "ZERO_OR_NULL_VALUE_DAYS";
+        }
+
+        if (YearMonth.now(TUNIS_ZONE).toString().equals(bucket)) {
+            return "CURRENT_MONTH_REFRESH";
+        }
+
+        return "COLLECTED_TOO_EARLY_OR_STALE";
+    }
+
+    private boolean looksLikeSolisUnscopedHistory(List<HistoryPointDto> points) {
+        if (points == null || points.size() <= 1) {
+            return false;
+        }
+
+        long validTimes = points.stream()
+                .map(HistoryPointDto::getCollectTime)
+                .filter(java.util.Objects::nonNull)
+                .count();
+
+        long distinctTimes = points.stream()
+                .map(HistoryPointDto::getCollectTime)
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .count();
+
+        return validTimes > 1 && distinctTimes <= 1;
     }
 
     private boolean isCurrentRefreshDue(
@@ -467,6 +641,15 @@ public class SiteHistoryBackfillService {
                 )
                 .orElse(null);
 
+        int attempts = existing != null && existing.getConsecutiveEmptyAttempts() != null
+                ? existing.getConsecutiveEmptyAttempts() + 1
+                : 1;
+        long baseDelay = Math.max(60_000L, emptyHistoryRetryMs);
+        int exponent = Math.min(Math.max(0, attempts - 1), 6);
+        long retryDelay = Math.min(Math.max(baseDelay, emptyHistoryMaxRetryMs),
+                baseDelay * (1L << exponent));
+        boolean confirmedEmpty = attempts >= Math.max(1, emptyConfirmedAfterAttempts);
+
         SiteHistoryDocument marker = SiteHistoryDocument.builder()
                 .id(existing != null ? existing.getId() : null)
                 .brand(task.site().getBrand())
@@ -479,6 +662,10 @@ public class SiteHistoryBackfillService {
                 .lastSyncAt(now)
                 .createdAt(existing != null ? existing.getCreatedAt() : now)
                 .updatedAt(now)
+                .collectionStatus(confirmedEmpty ? "EMPTY_CONFIRMED" : "EMPTY_RETRY")
+                .consecutiveEmptyAttempts(attempts)
+                .nextRetryAt(now.plusMillis(retryDelay))
+                .lastSuccessfulSyncAt(existing != null ? existing.getLastSuccessfulSyncAt() : null)
                 .build();
 
         siteHistoryRepository.save(marker);

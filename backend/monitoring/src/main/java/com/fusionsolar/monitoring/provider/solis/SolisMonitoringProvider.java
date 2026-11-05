@@ -1,6 +1,8 @@
 package com.fusionsolar.monitoring.provider.solis;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fusionsolar.monitoring.client.solis.SolisCloudClient;
 import com.fusionsolar.monitoring.dto.DeviceItemDto;
 import com.fusionsolar.monitoring.dto.HistoryPointDto;
@@ -10,6 +12,7 @@ import com.fusionsolar.monitoring.dto.SiteSummaryDto;
 import com.fusionsolar.monitoring.persistence.enums.Brand;
 import com.fusionsolar.monitoring.provider.MonitoringProvider;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
@@ -31,8 +34,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 @Component
+@Slf4j
 @RequiredArgsConstructor
 @ConditionalOnProperty(prefix = "providers.solis", name = "enabled", havingValue = "true")
 public class SolisMonitoringProvider implements MonitoringProvider {
@@ -42,9 +47,40 @@ public class SolisMonitoringProvider implements MonitoringProvider {
 
     private static final String STATION_LIST = "/v1/api/userStationList";
     private static final String STATION_DETAIL = "/v1/api/stationDetail";
+
+    /*
+     * DAY:
+     * - STATION_DAY = vraie courbe journalière d'une station.
+     * - Retour attendu: plusieurs points avec time/timeStr + power.
+     * - Unité courbe: kW.
+     */
+    private static final String STATION_DAY = "/v1/api/stationDay";
+
+    /*
+     * STATION_DAY_ENERGY retourne la production totale du jour par station.
+     * On le garde en constante car utile si tu veux plus tard un KPI journalier batch,
+     * mais il ne doit pas servir pour dessiner la courbe Day.
+     */
     private static final String STATION_DAY_ENERGY = "/v1/api/stationDayEnergyList";
+
+    /*
+     * MONTH/YEAR single-station détaillés:
+     * - STATION_MONTH retourne les kWh par jour du mois demandé.
+     * - STATION_YEAR retourne les kWh par mois de l'année demandée.
+     *
+     * IMPORTANT:
+     * Les endpoints *EnergyList retournent souvent un seul total par station.
+     * Ils ne suffisent pas pour afficher le KPI journalier historique dans le front.
+     */
+    private static final String STATION_MONTH = "/v1/api/stationMonth";
+    private static final String STATION_YEAR = "/v1/api/stationYear";
+
+    /*
+     * Gardés uniquement comme référence/fallback éventuel, pas pour les courbes UI.
+     */
     private static final String STATION_MONTH_ENERGY = "/v1/api/stationMonthEnergyList";
     private static final String STATION_YEAR_ENERGY = "/v1/api/stationYearEnergyList";
+
     private static final String INVERTER_LIST = "/v1/api/inverterList";
 
     private final SolisCloudClient solisCloudClient;
@@ -66,20 +102,27 @@ public class SolisMonitoringProvider implements MonitoringProvider {
                     "pageSize", pageSize
             ));
 
-            List<JsonNode> records = extractRecords(data);
+            com.fusionsolar.monitoring.provider.ProviderInventoryPage inventoryPage =
+                    com.fusionsolar.monitoring.provider.ProviderInventoryPage.parse(data,
+                            "records", "list", "rows", "datas", "dataList");
+            List<JsonNode> records = inventoryPage.records();
 
             for (JsonNode record : records) {
                 SiteSummaryDto site = toSiteSummary(record);
 
                 if (site.getSiteCode() != null && !site.getSiteCode().isBlank()) {
-                    sitesByCode.put(site.getSiteCode(), site);
+                    if (sitesByCode.putIfAbsent(site.getSiteCode(), site) != null)
+                        throw new IllegalStateException("Solis repeated site in paginated inventory");
+                } else {
+                    throw new IllegalStateException("Solis inventory contains invalid site identity");
                 }
             }
 
-            if (records.size() < pageSize || !hasMorePages(data, pageNo, pageSize)) {
+            if (!inventoryPage.hasNext(sitesByCode.size(), pageSize)) {
                 break;
             }
 
+            if (pageNo == 50) throw new IllegalStateException("Solis inventory pagination limit exceeded");
             pageNo++;
         }
 
@@ -117,30 +160,122 @@ public class SolisMonitoringProvider implements MonitoringProvider {
 
         String bucket = value == null || value.isBlank()
                 ? defaultBucket(normalizedType)
-                : value;
+                : value.trim();
+
+        boolean dayCurve = "day".equals(normalizedType);
 
         String path = switch (normalizedType) {
-            case "day" -> STATION_DAY_ENERGY;
-            case "month" -> STATION_MONTH_ENERGY;
-            case "year", "yearly" -> STATION_YEAR_ENERGY;
+            case "day" -> STATION_DAY;
+            case "month" -> STATION_MONTH;
+            case "year", "yearly" -> STATION_YEAR;
             default -> throw new IllegalArgumentException("Invalid Solis history type: " + type);
         };
 
-        JsonNode data = solisCloudClient.post(path, stationHistoryBody(siteCode, bucket));
+        Map<String, Object> body = stationHistoryBody(siteCode, normalizedType, bucket);
+
+        JsonNode data = solisCloudClient.post(path, body);
+        List<JsonNode> records = extractHistoryRecords(data);
+
+        /*
+         * Pour DAY, /stationDay est déjà un endpoint single-station.
+         * Les records peuvent ne pas contenir stationId/id.
+         * Donc on ne filtre pas par id pour ne pas supprimer toute la vraie courbe.
+         */
+        if (dayCurve) {
+            List<HistoryPointDto> points = toHistoryPoints(records, normalizedType, bucket, siteCode);
+            logParsedHistory(siteCode, normalizedType, bucket, records, points);
+            return points;
+        }
+
+        /*
+         * Pour MONTH/YEAR, si la réponse contient explicitement stationId/stationCode,
+         * on filtre par site pour éviter le retour global.
+         *
+         * Important:
+         * On ne considère PAS "id" comme stationId ici, car certains endpoints Solis
+         * retournent un id de ligne différent de l'id station.
+         */
+        boolean responseHasStrictStationIds = records.stream()
+                .map(this::recordStationId)
+                .anyMatch(id -> id != null && !id.isBlank());
+
+        if (responseHasStrictStationIds) {
+            records = records.stream()
+                    .filter(record -> isRecordForStation(record, siteCode))
+                    .toList();
+
+            if (records.isEmpty()) {
+                log.info(
+                        "Solis history has no record for requested site. site={} type={} bucket={}",
+                        siteCode,
+                        normalizedType,
+                        bucket
+                );
+                return List.of();
+            }
+        } else if (looksLikeUnscopedStationList(records, normalizedType, bucket)) {
+            log.warn(
+                    "Solis history ignored because response looks unscoped. site={} type={} bucket={} records={} sample={}",
+                    siteCode,
+                    normalizedType,
+                    bucket,
+                    records.size(),
+                    records.isEmpty() ? "" : oneLineNode(records.get(0))
+            );
+            return List.of();
+        }
+
+        List<HistoryPointDto> points = toHistoryPoints(records, normalizedType, bucket, siteCode);
+        logParsedHistory(siteCode, normalizedType, bucket, records, points);
+        return points;
+    }
+
+    private void logParsedHistory(
+            String siteCode,
+            String normalizedType,
+            String bucket,
+            List<JsonNode> records,
+            List<HistoryPointDto> points
+    ) {
+        log.info(
+                "Solis history parsed site={} type={} bucket={} records={} points={}",
+                siteCode,
+                normalizedType,
+                bucket,
+                records == null ? 0 : records.size(),
+                points == null ? 0 : points.size()
+        );
+
+        if (log.isDebugEnabled() && records != null && !records.isEmpty()) {
+            log.debug("Solis history sample site={} type={} bucket={} sample={}",
+                    siteCode, normalizedType, bucket, oneLineNode(records.get(0)));
+        }
+    }
+
+    private List<HistoryPointDto> toHistoryPoints(
+            List<JsonNode> records,
+            String normalizedType,
+            String bucket,
+            String siteCode
+    ) {
+        if (records == null || records.isEmpty()) {
+            log.debug(
+                    "Solis history empty. site={} type={} bucket={}",
+                    siteCode,
+                    normalizedType,
+                    bucket
+            );
+            return List.of();
+        }
 
         List<HistoryPointDto> points = new ArrayList<>();
 
-        for (JsonNode record : extractRecords(data)) {
+        for (JsonNode record : records) {
             Long collectTime = collectTime(record, normalizedType, bucket);
-            Double valueKwh = historyEnergyValue(record, normalizedType);
+            Double value = historyValue(record, normalizedType);
 
-            /*
-             * Important:
-             * Ne pas ajouter un point sans valeur énergie.
-             * Et surtout ne jamais utiliser power/pac comme fallback énergie.
-             */
-            if (collectTime != null && valueKwh != null) {
-                points.add(new HistoryPointDto(collectTime, valueKwh));
+            if (collectTime != null && value != null && value >= 0) {
+                points.add(new HistoryPointDto(collectTime, value));
             }
         }
 
@@ -151,13 +286,12 @@ public class SolisMonitoringProvider implements MonitoringProvider {
                 )
         );
 
-        return points;
+        return deduplicateByTime(points);
     }
 
     /**
      * Batch Solis pour accélérer le backfill des courbes MONTH/YEAR.
-     * SolisCloud accepte jusqu’à 100 stations par appel via idList/stationIds.
-     * Le DAY reste site par site, car la courbe détaillée d’une journée est plus spécifique.
+     * Le DAY doit rester site par site avec /stationDay, car c'est une courbe détaillée.
      */
     public Map<String, List<HistoryPointDto>> getBatchHistory(
             List<String> siteCodes,
@@ -178,54 +312,39 @@ public class SolisMonitoringProvider implements MonitoringProvider {
 
         String bucket = value == null || value.isBlank()
                 ? defaultBucket(normalizedType)
-                : value;
-
-        String path = "month".equals(normalizedType)
-                ? STATION_MONTH_ENERGY
-                : STATION_YEAR_ENERGY;
+                : value.trim();
 
         List<String> ids = siteCodes.stream()
                 .filter(code -> code != null && !code.isBlank())
+                .map(String::trim)
                 .distinct()
                 .limit(100)
                 .toList();
 
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("pageNo", 1);
-        body.put("pageSize", Math.min(100, ids.size()));
-        body.put("time", bucket);
-        body.put("idList", ids);
-        body.put("stationIds", String.join(",", ids));
-
-        JsonNode data = solisCloudClient.post(path, body);
         Map<String, List<HistoryPointDto>> pointsBySite = new LinkedHashMap<>();
 
-        for (JsonNode record : extractRecords(data)) {
-            String stationId = firstText(record, "stationId", "stationCode", "id", "plantId", "psId");
-
-            if ((stationId == null || stationId.isBlank()) && ids.size() == 1) {
-                stationId = ids.get(0);
-            }
-
-            if (stationId == null || stationId.isBlank()) {
-                continue;
-            }
-
-            Long collectTime = collectTime(record, normalizedType, bucket);
-            Double valueKwh = historyEnergyValue(record, normalizedType);
-
-            if (collectTime != null && valueKwh != null) {
-                pointsBySite.computeIfAbsent(stationId, ignored -> new ArrayList<>())
-                        .add(new HistoryPointDto(collectTime, valueKwh));
+        /*
+         * Correction importante:
+         * Pour les KPI journaliers historiques, on a besoin des points journaliers du mois.
+         * Les endpoints batch stationMonthEnergyList/stationYearEnergyList renvoient souvent
+         * un seul total par station. On utilise donc les endpoints single-station détaillés
+         * stationMonth/stationYear, site par site.
+         */
+        for (String siteCode : ids) {
+            try {
+                List<HistoryPointDto> points = getHistory(siteCode, normalizedType, bucket);
+                pointsBySite.put(siteCode, points != null ? points : List.of());
+            } catch (Exception e) {
+                log.warn(
+                        "Solis detailed history failed in batch fallback. site={} type={} bucket={} cause={}",
+                        siteCode,
+                        normalizedType,
+                        bucket,
+                        e.getMessage()
+                );
+                pointsBySite.put(siteCode, List.of());
             }
         }
-
-        pointsBySite.replaceAll((stationId, points) -> points.stream()
-                .sorted(Comparator.comparing(
-                        HistoryPointDto::getCollectTime,
-                        Comparator.nullsLast(Long::compareTo)
-                ))
-                .toList());
 
         return pointsBySite;
     }
@@ -290,17 +409,17 @@ public class SolisMonitoringProvider implements MonitoringProvider {
     private SiteSummaryDto toSiteSummary(JsonNode node) {
         Double dayEnergyKwh = nonNegative(firstEnergyKwh(
                 node,
-                "dayEnergyKwh", "dayEnergy", "todayEnergy", "etoday"
+                "dayEnergyKwh", "dayEnergy", "todayEnergy", "etoday", "eToday", "homeLoadTodayEnergy"
         ));
 
         Double monthEnergyKwh = nonNegative(firstEnergyKwh(
                 node,
-                "monthEnergyKwh", "monthEnergy", "emonth"
+                "monthEnergyKwh", "monthEnergy", "emonth", "eMonth"
         ));
 
         Double rawYearEnergyKwh = firstEnergyKwh(
                 node,
-                "yearEnergyKwh", "yearEnergy", "eyear"
+                "yearEnergyKwh", "yearEnergy", "eyear", "eYear"
         );
 
         Double totalEnergyKwh = nonNegative(firstEnergyKwh(
@@ -319,7 +438,7 @@ public class SolisMonitoringProvider implements MonitoringProvider {
                 firstText(node, "stationCode", "stationId", "id", "plantId", "psId"),
                 firstText(node, "stationName", "plantName", "name", "psName"),
                 toApiStatus(firstText(node, "status", "state", "runningStatus", "stationStatus")),
-                nonNegative(firstNumber(node, "installedPowerKw", "installedPower", "capacity", "capacityKw", "totalCapacity", "powerCapacity")),
+                nonNegative(firstNumber(node, "installedPowerKw", "installedPower", "capacity", "capacityKw", "totalCapacity", "powerCapacity", "power")),
                 normalizeSolisDisplayDate(firstText(node, "gridConnectionDate", "gridConnectedTime", "connectTime", "createDate", "createTime")),
                 dayEnergyKwh,
                 monthEnergyKwh,
@@ -353,7 +472,8 @@ public class SolisMonitoringProvider implements MonitoringProvider {
         if (value == null || value.isNaN() || value.isInfinite() || value < 0) {
             return null;
         }
-        return value;
+
+        return round2(value);
     }
 
     private SiteDetailDto toDetail(SiteSummaryDto site) {
@@ -389,56 +509,209 @@ public class SolisMonitoringProvider implements MonitoringProvider {
     }
 
     private Map<String, Object> stationBody(String siteCode) {
-        return Map.of(
-                "id", siteCode,
-                "stationId", siteCode,
-                "stationCode", siteCode
-        );
+        Object stationId = stationIdBodyValue(siteCode);
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", stationId);
+        body.put("stationId", stationId);
+        body.put("stationCode", siteCode);
+        body.put("plantId", stationId);
+        body.put("psId", stationId);
+        return body;
     }
 
-    private Map<String, Object> stationHistoryBody(String siteCode, String bucket) {
-        return Map.of(
-                "id", siteCode,
-                "stationId", siteCode,
-                "stationCode", siteCode,
-                "time", bucket,
-                "date", bucket
-        );
+    private Map<String, Object> stationDayCurveBody(String siteCode, String bucket) {
+        Object stationId = stationIdBodyValue(siteCode);
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", stationId);
+
+        /*
+         * D'après les retours Solis observés chez toi, les données reviennent avec timeZone=8.
+         * On garde donc 8 pour rester aligné avec SolisCloud.
+         */
+        body.put("money", "TND");
+        body.put("time", bucket);
+        body.put("timeZone", 8);
+        body.put("nmiCode", "");
+
+        return body;
+    }
+
+    private Map<String, Object> stationHistoryBody(String siteCode, String type, String bucket) {
+        if ("day".equals(type)) {
+            return stationDayCurveBody(siteCode, bucket);
+        }
+
+        Object stationId = stationIdBodyValue(siteCode);
+        Map<String, Object> body = new LinkedHashMap<>();
+
+        /*
+         * IMPORTANT SOLIS:
+         * La documentation officielle de /stationMonth et /stationYear attend un body minimal:
+         *   stationMonth: id, money, month, timeZone, nmiCode
+         *   stationYear : id, money, year,  timeZone, nmiCode
+         * Les variantes stationId/stationCode/plantId/psId/time/date/startDate/endDate peuvent
+         * provoquer des réponses partielles selon les comptes. On les évite ici.
+         */
+        body.put("id", stationId);
+        body.put("money", "TND");
+        body.put("timeZone", 8);
+        body.put("nmiCode", "");
+
+        if ("month".equals(type)) {
+            body.put("month", bucket);
+        } else if ("year".equals(type) || "yearly".equals(type)) {
+            body.put("year", bucket.substring(0, Math.min(4, bucket.length())));
+        } else {
+            body.put("time", bucket);
+        }
+
+        return body;
+    }
+
+    private Object stationIdBodyValue(String siteCode) {
+        if (siteCode == null) {
+            return "";
+        }
+
+        /*
+         * Solis montre les IDs station entre guillemets dans ses exemples officiels.
+         * On conserve donc le 19 chiffres en String. Cela évite toute ambiguïté côté API
+         * et tout risque d'arrondi si le backend Solis passe par un parser JSON number.
+         */
+        return siteCode.trim();
+    }
+
+    private boolean isRecordForStation(JsonNode record, String siteCode) {
+        String recordStationId = recordStationId(record);
+
+        if (recordStationId == null || recordStationId.isBlank()) {
+            return true;
+        }
+
+        String left = normalizedProviderId(recordStationId);
+        String right = normalizedProviderId(siteCode);
+
+        return left != null && left.equals(right);
     }
 
     /*
-     * Valeur énergie historique.
+     * Strict station id.
      *
-     * On exclut volontairement:
-     * - power
-     * - pac
-     * - activePower
-     * - currentPower
-     * - totalEnergy
-     * - allEnergy
-     *
-     * Ces champs ne doivent pas être sommés dans les historiques day/month/year.
+     * Important:
+     * On ne met PAS "id" ici, car certains endpoints Solis retournent un id de ligne
+     * différent de l'id station.
      */
-    private Double historyEnergyValue(JsonNode record, String type) {
+    private String recordStationId(JsonNode record) {
+        return firstText(
+                record,
+                "stationId",
+                "stationCode",
+                "station_id",
+                "plantId",
+                "plant_id",
+                "psId",
+                "ps_id"
+        );
+    }
+
+    private String recordStationIdForRequested(JsonNode record, Set<String> requestedIds) {
+        String scoped = recordStationId(record);
+
+        if (scoped != null && !scoped.isBlank()) {
+            return scoped;
+        }
+
+        /*
+         * Pour les endpoints batch, le champ "id" peut être l'id station.
+         * On l'accepte seulement s'il correspond vraiment à l'un des IDs demandés.
+         */
+        String id = firstText(record, "id");
+        String normalizedId = normalizedProviderId(id);
+
+        if (normalizedId != null && requestedIds != null && requestedIds.contains(normalizedId)) {
+            return id;
+        }
+
+        return null;
+    }
+
+    private String requestedSiteKey(String stationId, List<String> requestedIds) {
+        String normalizedStationId = normalizedProviderId(stationId);
+
+        if (normalizedStationId == null || requestedIds == null || requestedIds.isEmpty()) {
+            return stationId;
+        }
+
+        return requestedIds.stream()
+                .filter(id -> normalizedStationId.equals(normalizedProviderId(id)))
+                .findFirst()
+                .orElse(stationId);
+    }
+
+    private String normalizedProviderId(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+
+        String trimmed = value.trim();
+
+        if (trimmed.matches("^\\d+(?:\\.0+)?$")) {
+            String numeric = trimmed.replaceAll("\\.0+$", "");
+            numeric = numeric.replaceFirst("^0+(?!$)", "");
+            return numeric;
+        }
+
+        return trimmed.toLowerCase(Locale.ROOT);
+    }
+
+    private boolean looksLikeUnscopedStationList(List<JsonNode> records, String type, String bucket) {
+        if (records == null || records.size() <= 1) {
+            return false;
+        }
+
+        /*
+         * Si les records ont un axe horaire/journalier/mensuel exploitable,
+         * ce n'est probablement pas une liste globale non filtrée.
+         */
+        if (hasGranularAxis(records, type)) {
+            return false;
+        }
+
+        long validTimes = records.stream()
+                .map(record -> collectTime(record, type, bucket))
+                .filter(Objects::nonNull)
+                .count();
+
+        long distinctTimes = records.stream()
+                .map(record -> collectTime(record, type, bucket))
+                .filter(Objects::nonNull)
+                .distinct()
+                .count();
+
+        return validTimes > 1 && distinctTimes <= 1;
+    }
+
+    /*
+     * DAY retourne maintenant une puissance kW.
+     * MONTH/YEAR retournent des énergies kWh.
+     */
+    private Double historyValue(JsonNode record, String type) {
         return switch (type) {
-            case "day" -> firstEnergyKwh(
+            case "day" -> firstPowerKw(
                     record,
-                    "energy",
-                    "generation",
-                    "generationValue",
-                    "yield",
-                    "value",
-                    "hourEnergy",
-                    "dayEnergy",
-                    "eToday",
-                    "etoday",
-                    "energyKwh",
-                    "kwh"
+                    "power",
+                    "psum",
+                    "pac",
+                    "p",
+                    "value"
             );
 
             case "month" -> firstEnergyKwh(
                     record,
                     "energy",
+                    "energyStr",
                     "generation",
                     "generationValue",
                     "yield",
@@ -454,6 +727,7 @@ public class SolisMonitoringProvider implements MonitoringProvider {
             case "year", "yearly" -> firstEnergyKwh(
                     record,
                     "energy",
+                    "energyStr",
                     "generation",
                     "generationValue",
                     "yield",
@@ -470,12 +744,29 @@ public class SolisMonitoringProvider implements MonitoringProvider {
         };
     }
 
+    private List<JsonNode> extractHistoryRecords(JsonNode node) {
+        List<JsonNode> records = new ArrayList<>();
+
+        collectPairedAxisRecords(records, node);
+        if (!records.isEmpty()) {
+            return records;
+        }
+
+        return extractRecords(node);
+    }
+
     private List<JsonNode> extractRecords(JsonNode node) {
         List<JsonNode> records = new ArrayList<>();
+
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return records;
+        }
 
         collectArray(records, node.path("records"));
         collectArray(records, node.path("list"));
         collectArray(records, node.path("rows"));
+        collectArray(records, node.path("datas"));
+        collectArray(records, node.path("dataList"));
 
         collectArray(records, node.path("page").path("records"));
         collectArray(records, node.path("page").path("list"));
@@ -483,12 +774,18 @@ public class SolisMonitoringProvider implements MonitoringProvider {
         collectArray(records, node.path("data").path("records"));
         collectArray(records, node.path("data").path("list"));
         collectArray(records, node.path("data").path("rows"));
+        collectArray(records, node.path("data").path("datas"));
+        collectArray(records, node.path("data").path("dataList"));
 
         collectArray(records, node.path("data").path("page").path("records"));
         collectArray(records, node.path("data").path("page").path("list"));
 
         if (records.isEmpty() && node.isArray()) {
             collectArray(records, node);
+        }
+
+        if (records.isEmpty() && node.path("data").isArray()) {
+            collectArray(records, node.path("data"));
         }
 
         if (records.isEmpty() && node.isObject()) {
@@ -500,6 +797,143 @@ public class SolisMonitoringProvider implements MonitoringProvider {
         }
 
         return records;
+    }
+
+    private void collectPairedAxisRecords(List<JsonNode> records, JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return;
+        }
+
+        if (node.isObject()) {
+            JsonNode axisArray = firstArray(
+                    node,
+                    "xAxis",
+                    "xaxis",
+                    "xData",
+                    "xdata",
+                    "times",
+                    "timeList",
+                    "dateList",
+                    "dayList",
+                    "monthList",
+                    "labels",
+                    "labelList",
+                    "names",
+                    "nameList"
+            );
+
+            JsonNode valueArray = normalizeSeriesArray(firstArray(
+                    node,
+                    "yAxis",
+                    "yaxis",
+                    "yData",
+                    "ydata",
+                    "values",
+                    "valueList",
+                    "energyList",
+                    "energies",
+                    "dayEnergyList",
+                    "monthEnergyList",
+                    "generationList",
+                    "generationValueList",
+                    "powerList",
+                    "powers",
+                    "pacList",
+                    "dataList",
+                    "datas"
+            ));
+
+            if (axisArray != null
+                    && valueArray != null
+                    && axisArray.isArray()
+                    && valueArray.isArray()
+                    && axisArray.size() > 0
+                    && valueArray.size() > 0) {
+                int size = Math.min(axisArray.size(), valueArray.size());
+
+                for (int index = 0; index < size; index++) {
+                    ObjectNode record = JsonNodeFactory.instance.objectNode();
+                    copyAxisValue(record, axisArray.get(index));
+                    copyHistoryValue(record, valueArray.get(index));
+                    records.add(record);
+                }
+
+                return;
+            }
+
+            node.fields().forEachRemaining(entry -> collectPairedAxisRecords(records, entry.getValue()));
+            return;
+        }
+
+        if (node.isArray()) {
+            node.forEach(child -> collectPairedAxisRecords(records, child));
+        }
+    }
+
+    private JsonNode firstArray(JsonNode node, String... fields) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+
+        for (String field : fields) {
+            JsonNode value = node.path(field);
+            if (value != null && value.isArray()) {
+                return value;
+            }
+        }
+
+        return null;
+    }
+
+    private JsonNode normalizeSeriesArray(JsonNode candidate) {
+        if (candidate == null || !candidate.isArray()) {
+            return candidate;
+        }
+
+        if (candidate.size() > 0 && candidate.get(0).isArray()) {
+            return candidate.get(0);
+        }
+
+        if (candidate.size() > 0 && candidate.get(0).isObject()) {
+            JsonNode data = firstArray(candidate.get(0), "data", "values", "valueList", "energyList", "powerList");
+            if (data != null) {
+                return data;
+            }
+        }
+
+        return candidate;
+    }
+
+    private void copyAxisValue(ObjectNode target, JsonNode axis) {
+        if (axis == null || axis.isNull()) {
+            return;
+        }
+
+        if (axis.isObject()) {
+            axis.fields().forEachRemaining(entry -> target.set(entry.getKey(), entry.getValue()));
+            return;
+        }
+
+        target.set("xAxis", axis);
+    }
+
+    private void copyHistoryValue(ObjectNode target, JsonNode value) {
+        if (value == null || value.isNull()) {
+            return;
+        }
+
+        if (value.isObject()) {
+            value.fields().forEachRemaining(entry -> target.set(entry.getKey(), entry.getValue()));
+            if (!target.has("value")) {
+                JsonNode nestedValue = value.path("data");
+                if (!nestedValue.isMissingNode() && !nestedValue.isArray() && !nestedValue.isObject()) {
+                    target.set("value", nestedValue);
+                }
+            }
+            return;
+        }
+
+        target.set("value", value);
     }
 
     private void collectArray(List<JsonNode> records, JsonNode candidate) {
@@ -539,35 +973,55 @@ public class SolisMonitoringProvider implements MonitoringProvider {
             total = firstInteger(data.path("page"), "total", "totalCount", "recordCount");
         }
 
-        return total != null && pageNo * pageSize < total;
+        return total == null || pageNo * pageSize < total;
     }
 
-    private String toApiStatus(String rawStatus) {
-        if (rawStatus == null || rawStatus.isBlank()) {
-            return "unknown";
-        }
-
-        String status = rawStatus.trim().toLowerCase(Locale.ROOT);
-
-        return switch (status) {
-            case "1", "normal", "online", "running", "healthy", "ok", "active" -> "healthy";
-            case "2", "fault", "faulty", "alarm", "alarms", "warning", "error" -> "faulty";
-            case "3", "4", "offline", "disconnected", "inactive", "disconnect" -> "disconnected";
-            default -> "unknown";
-        };
+  private String toApiStatus(String rawStatus) {
+    if (rawStatus == null || rawStatus.isBlank()) {
+        return "unknown";
     }
+
+    String status = rawStatus.trim().toLowerCase(Locale.ROOT);
+
+    return switch (status) {
+        case "1", "normal", "online", "running",
+             "healthy", "ok", "active" -> "healthy";
+
+        case "2", "offline", "disconnected",
+             "inactive", "disconnect" -> "disconnected";
+
+        case "3", "fault", "faulty", "alarm",
+             "alarms", "warning", "error" -> "faulty";
+
+        default -> "unknown";
+    };
+}
 
     private Long collectTime(JsonNode record, String type, String bucket) {
+        Long granularTime = collectTimeFromGranularAxis(record, type, bucket);
+
+        if (granularTime != null) {
+            return granularTime;
+        }
+
         String raw = firstText(
                 record,
                 "collectTime",
+                "collect_time",
+                "dataTime",
+                "data_time",
+                "timestamp",
                 "time",
                 "date",
+                "dateStr",
+                "timeStr",
                 "day",
                 "month",
                 "year",
                 "xAxis",
-                "label"
+                "xaxis",
+                "label",
+                "name"
         );
 
         if (raw == null || raw.isBlank()) {
@@ -674,6 +1128,318 @@ public class SolisMonitoringProvider implements MonitoringProvider {
         return null;
     }
 
+    private Long collectTimeFromGranularAxis(JsonNode record, String type, String bucket) {
+        return switch (type) {
+            case "day" -> {
+                String timeText = firstText(
+                        record,
+                        "timeStr",
+                        "timeText",
+                        "hourText",
+                        "xAxis",
+                        "xaxis",
+                        "label",
+                        "name"
+                );
+
+                LocalTime time = parseTimeOfDay(timeText);
+
+                if (time != null) {
+                    yield LocalDate.parse(bucket)
+                            .atTime(time)
+                            .atZone(TUNIS_ZONE)
+                            .toInstant()
+                            .toEpochMilli();
+                }
+
+                Integer hour = parseHourUnit(firstText(
+                        record,
+                        "hour",
+                        "hours",
+                        "hourNo",
+                        "hourIndex",
+                        "timePoint",
+                        "point"
+                ));
+
+                if (hour == null) {
+                    yield null;
+                }
+
+                yield LocalDate.parse(bucket)
+                        .atTime(LocalTime.of(hour, 0))
+                        .atZone(TUNIS_ZONE)
+                        .toInstant()
+                        .toEpochMilli();
+            }
+
+            case "month" -> {
+                Integer day = parseDayUnit(firstText(
+                        record,
+                        "day",
+                        "dayNo",
+                        "dayIndex",
+                        "dateStr",
+                        "date",
+                        "xAxis",
+                        "xaxis",
+                        "label",
+                        "name"
+                ));
+
+                if (day == null) {
+                    yield null;
+                }
+
+                YearMonth yearMonth = YearMonth.parse(bucket);
+                int safeDay = Math.max(1, Math.min(day, yearMonth.lengthOfMonth()));
+
+                yield yearMonth
+                        .atDay(safeDay)
+                        .atStartOfDay(TUNIS_ZONE)
+                        .toInstant()
+                        .toEpochMilli();
+            }
+
+            case "year", "yearly" -> {
+                Integer month = parseMonthUnit(firstText(
+                        record,
+                        "month",
+                        "monthNo",
+                        "monthIndex",
+                        "dateStr",
+                        "date",
+                        "xAxis",
+                        "xaxis",
+                        "label",
+                        "name"
+                ));
+
+                if (month == null) {
+                    yield null;
+                }
+
+                int year = Integer.parseInt(bucket.substring(0, 4));
+                int safeMonth = Math.max(1, Math.min(month, 12));
+
+                yield YearMonth.of(year, safeMonth)
+                        .atDay(1)
+                        .atStartOfDay(TUNIS_ZONE)
+                        .toInstant()
+                        .toEpochMilli();
+            }
+
+            default -> null;
+        };
+    }
+
+    private boolean hasGranularAxis(List<JsonNode> records, String type) {
+        if (records == null || records.isEmpty()) {
+            return false;
+        }
+
+        return switch (type) {
+            case "day" -> records.stream().anyMatch(record ->
+                    parseTimeOfDay(firstText(
+                            record,
+                            "timeStr",
+                            "timeText",
+                            "hourText",
+                            "xAxis",
+                            "xaxis",
+                            "label",
+                            "name"
+                    )) != null
+                            || parseHourUnit(firstText(
+                            record,
+                            "hour",
+                            "hours",
+                            "hourNo",
+                            "hourIndex",
+                            "timePoint",
+                            "point"
+                    )) != null
+            );
+
+            case "month" -> records.stream().anyMatch(record -> parseDayUnit(firstText(
+                    record,
+                    "day",
+                    "dayNo",
+                    "dayIndex",
+                    "dateStr",
+                    "date",
+                    "xAxis",
+                    "xaxis",
+                    "label",
+                    "name"
+            )) != null);
+
+            case "year", "yearly" -> records.stream().anyMatch(record -> parseMonthUnit(firstText(
+                    record,
+                    "month",
+                    "monthNo",
+                    "monthIndex",
+                    "dateStr",
+                    "date",
+                    "xAxis",
+                    "xaxis",
+                    "label",
+                    "name"
+            )) != null);
+
+            default -> false;
+        };
+    }
+
+    private LocalTime parseTimeOfDay(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+
+        String text = raw.trim();
+
+        List<DateTimeFormatter> formatters = List.of(
+                DateTimeFormatter.ofPattern("H:mm:ss"),
+                DateTimeFormatter.ofPattern("HH:mm:ss"),
+                DateTimeFormatter.ofPattern("H:mm"),
+                DateTimeFormatter.ofPattern("HH:mm")
+        );
+
+        for (DateTimeFormatter formatter : formatters) {
+            try {
+                return LocalTime.parse(text, formatter);
+            } catch (DateTimeParseException ignored) {
+                // Try next.
+            }
+        }
+
+        return null;
+    }
+
+    private Integer parseHourUnit(String raw) {
+        Integer value = parseSmallUnit(raw, 0, 23);
+
+        if (value != null) {
+            return value;
+        }
+
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+
+        String text = raw.trim().toLowerCase(Locale.ROOT);
+
+        if (text.matches("^\\d{1,2}:\\d{2}.*$")) {
+            try {
+                int hour = Integer.parseInt(text.substring(0, text.indexOf(':')));
+
+                if (hour >= 0 && hour <= 23) {
+                    return hour;
+                }
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+
+        if (text.matches("^\\d{1,2}h.*$")) {
+            try {
+                int hour = Integer.parseInt(text.replaceFirst("^(\\d{1,2}).*$", "$1"));
+
+                if (hour >= 0 && hour <= 23) {
+                    return hour;
+                }
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    private Integer parseDayUnit(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+
+        String text = raw.trim();
+
+        if (text.matches("^\\d{4}-\\d{2}-\\d{2}$")) {
+            try {
+                return LocalDate.parse(text).getDayOfMonth();
+            } catch (DateTimeParseException ignored) {
+                return null;
+            }
+        }
+
+        if (text.matches("^\\d{4}/\\d{2}/\\d{2}$")) {
+            try {
+                return LocalDate.parse(text, DateTimeFormatter.ofPattern("yyyy/MM/dd")).getDayOfMonth();
+            } catch (DateTimeParseException ignored) {
+                return null;
+            }
+        }
+
+        return parseSmallUnit(text, 1, 31);
+    }
+
+    private Integer parseMonthUnit(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+
+        String text = raw.trim();
+
+        if (text.matches("^\\d{4}-\\d{2}-\\d{2}$")) {
+            try {
+                return LocalDate.parse(text).getMonthValue();
+            } catch (DateTimeParseException ignored) {
+                return null;
+            }
+        }
+
+        if (text.matches("^\\d{4}/\\d{2}/\\d{2}$")) {
+            try {
+                return LocalDate.parse(text, DateTimeFormatter.ofPattern("yyyy/MM/dd")).getMonthValue();
+            } catch (DateTimeParseException ignored) {
+                return null;
+            }
+        }
+
+        if (text.matches("^\\d{4}-\\d{2}$")) {
+            try {
+                return YearMonth.parse(text).getMonthValue();
+            } catch (DateTimeParseException ignored) {
+                return null;
+            }
+        }
+
+        return parseSmallUnit(text, 1, 12);
+    }
+
+    private Integer parseSmallUnit(String raw, int min, int max) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+
+        String text = raw.trim()
+                .toLowerCase(Locale.ROOT)
+                .replace(" ", "");
+
+        if (text.matches("^\\d{1,2}(?:\\.0+)?$")) {
+            try {
+                int value = (int) Double.parseDouble(text);
+
+                if (value >= min && value <= max) {
+                    return value;
+                }
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
     private Long parseEpochMillis(String raw) {
         if (raw == null || raw.isBlank()) {
             return null;
@@ -687,21 +1453,23 @@ public class SolisMonitoringProvider implements MonitoringProvider {
         try {
             long epoch = new BigDecimal(trimmed).longValue();
             long abs = Math.abs(epoch);
+
             if (abs < 1_000_000_000L) {
                 return null;
             }
 
-            // Solis peut renvoyer des timestamps en secondes (10 chiffres), millisecondes
-            // (13 chiffres), microsecondes ou parfois en notation scientifique via JSON.
             if (abs >= 10_000_000_000_000_000L) {
                 return epoch / 1_000_000L;
             }
+
             if (abs >= 100_000_000_000_000L) {
                 return epoch / 1_000L;
             }
+
             if (abs < 10_000_000_000L) {
                 return epoch * 1_000L;
             }
+
             return epoch;
         } catch (NumberFormatException | ArithmeticException ignored) {
             return null;
@@ -715,8 +1483,12 @@ public class SolisMonitoringProvider implements MonitoringProvider {
 
         String trimmed = raw.trim();
         Long epochMillis = collectTimeFromAnyDate(trimmed);
+
         if (epochMillis != null) {
-            return Instant.ofEpochMilli(epochMillis).atZone(TUNIS_ZONE).toLocalDate().format(SOLIS_DISPLAY_DATE);
+            return Instant.ofEpochMilli(epochMillis)
+                    .atZone(TUNIS_ZONE)
+                    .toLocalDate()
+                    .format(SOLIS_DISPLAY_DATE);
         }
 
         return trimmed;
@@ -729,6 +1501,7 @@ public class SolisMonitoringProvider implements MonitoringProvider {
 
         String trimmed = raw.trim();
         Long numericEpoch = parseEpochMillis(trimmed);
+
         if (numericEpoch != null) {
             return numericEpoch;
         }
@@ -749,7 +1522,7 @@ public class SolisMonitoringProvider implements MonitoringProvider {
                         .toInstant()
                         .toEpochMilli();
             } catch (DateTimeParseException ignored) {
-                // Try next format.
+                // Try next.
             }
         }
 
@@ -764,6 +1537,7 @@ public class SolisMonitoringProvider implements MonitoringProvider {
                 SOLIS_DISPLAY_DATE,
                 DateTimeFormatter.ofPattern("dd/MM/yyyy")
         );
+
         for (DateTimeFormatter formatter : dateFormatters) {
             try {
                 return LocalDate.parse(trimmed, formatter)
@@ -771,7 +1545,7 @@ public class SolisMonitoringProvider implements MonitoringProvider {
                         .toInstant()
                         .toEpochMilli();
             } catch (DateTimeParseException ignored) {
-                // Try next format.
+                // Try next.
             }
         }
 
@@ -787,14 +1561,18 @@ public class SolisMonitoringProvider implements MonitoringProvider {
     }
 
     private String firstText(JsonNode node, String... fields) {
+        if (node == null) {
+            return null;
+        }
+
         for (String field : fields) {
             JsonNode value = node.path(field);
 
             if (!value.isMissingNode() && !value.isNull()) {
                 String text = value.asText(null);
 
-                if (text != null && !text.isBlank()) {
-                    return text;
+                if (text != null && !text.isBlank() && !"null".equalsIgnoreCase(text)) {
+                    return text.trim();
                 }
             }
         }
@@ -827,10 +1605,63 @@ public class SolisMonitoringProvider implements MonitoringProvider {
                     field + "Label",
                     "unit",
                     "energyUnit",
-                    "dataUnit"
+                    "dataUnit",
+                    "energyStr"
             );
 
             Double converted = toKwh(value, unit != null ? unit : rawText);
+            return converted != null ? round2(converted) : round2(value);
+        }
+
+        return null;
+    }
+
+    private Double firstPowerKw(JsonNode node, String... fields) {
+        for (String field : fields) {
+            JsonNode rawNode = node.path(field);
+
+            if (rawNode.isMissingNode() || rawNode.isNull()) {
+                continue;
+            }
+
+            String rawText = rawNode.asText(null);
+            Double value = rawNode.isNumber() ? rawNode.asDouble() : parseNumber(rawText);
+
+            if (value == null) {
+                continue;
+            }
+
+            /*
+             * Solis stationDay expose souvent une valeur brute avec powerPec=0.001.
+             * Le libellé powerStr peut néanmoins être "kW" : ignorer le coefficient
+             * transforme par exemple 20 W en 20 kW. Le coefficient fournisseur est
+             * donc appliqué avant la conversion d'unité.
+             */
+            Double coefficient = firstNumber(node, field + "Pec", field + "_pec");
+            if (coefficient == null && "power".equals(field)) {
+                coefficient = firstNumber(node, "powerPec");
+            }
+            if (coefficient != null && coefficient > 0) {
+                value *= coefficient;
+            }
+
+            String unit = firstText(
+                    node,
+                    field + "Unit",
+                    field + "_unit",
+                    field + "unit",
+                    field + "Str",
+                    field + "Text",
+                    field + "Label",
+                    "unit",
+                    "powerUnit",
+                    "dataUnit",
+                    "powerStr",
+                    "psumStr",
+                    "pacStr"
+            );
+
+            Double converted = toKw(value, unit != null ? unit : rawText);
             return converted != null ? round2(converted) : round2(value);
         }
 
@@ -871,6 +1702,36 @@ public class SolisMonitoringProvider implements MonitoringProvider {
         return value;
     }
 
+    private Double toKw(Double value, String unitText) {
+        if (value == null) {
+            return null;
+        }
+
+        if (unitText == null || unitText.isBlank()) {
+            return value;
+        }
+
+        String normalized = unitText.trim()
+                .toLowerCase(Locale.ROOT)
+                .replace(" ", "")
+                .replace("·", "")
+                .replace("/", "");
+
+        if (normalized.contains("mw")) {
+            return value * 1_000.0;
+        }
+
+        if (normalized.contains("kw")) {
+            return value;
+        }
+
+        if (normalized.contains("w") && !normalized.contains("kw") && !normalized.contains("mw")) {
+            return value / 1_000.0;
+        }
+
+        return value;
+    }
+
     private Double firstNumber(JsonNode node, String... fields) {
         for (String field : fields) {
             JsonNode value = node.path(field);
@@ -881,7 +1742,6 @@ public class SolisMonitoringProvider implements MonitoringProvider {
                 }
 
                 String text = value.asText(null);
-
                 Double parsed = parseNumber(text);
 
                 if (parsed != null) {
@@ -943,6 +1803,39 @@ public class SolisMonitoringProvider implements MonitoringProvider {
         } catch (NumberFormatException ignored) {
             return null;
         }
+    }
+
+    private List<HistoryPointDto> deduplicateByTime(List<HistoryPointDto> points) {
+        if (points == null || points.isEmpty()) {
+            return List.of();
+        }
+
+        Map<Long, HistoryPointDto> byTime = new LinkedHashMap<>();
+
+        points.stream()
+                .filter(point -> point != null && point.getCollectTime() != null)
+                .sorted(Comparator.comparing(HistoryPointDto::getCollectTime))
+                .forEach(point -> byTime.put(point.getCollectTime(), point));
+
+        return new ArrayList<>(byTime.values());
+    }
+
+    private String oneLineNode(JsonNode node) {
+        if (node == null) {
+            return "";
+        }
+
+        String text = node.toString()
+                .replace("\r", " ")
+                .replace("\n", " ")
+                .replace("\t", " ")
+                .trim();
+
+        if (text.length() > 1200) {
+            return text.substring(0, 1200) + "...";
+        }
+
+        return text;
     }
 
     private double round2(double value) {

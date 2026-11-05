@@ -3,6 +3,7 @@ abstract class AppRoutes {
   static const shell = '/';
   static const dashboard = '/dashboard';
   static const swapDates = '/swap-dates';
+  static const planning = '/planning-terrain';
   static const performance = '/performance';
   static const comparatif = '/comparatif';
   static const sites = '/sites';

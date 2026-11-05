@@ -19,6 +19,8 @@ class EnergyLineChart extends StatelessWidget {
   final String mode;
   final double height;
 
+  bool get _isDayMode => mode == 'day';
+
   @override
   Widget build(BuildContext context) {
     if (points.isEmpty) {
@@ -33,11 +35,15 @@ class EnergyLineChart extends StatelessWidget {
     }
 
     final spots = <FlSpot>[];
+
     for (var i = 0; i < points.length; i++) {
       spots.add(FlSpot(i.toDouble(), points[i].value));
     }
 
-    final maxY = points.fold<double>(0, (max, point) => point.value > max ? point.value : max);
+    final maxY = points.fold<double>(
+      0,
+      (max, point) => point.value > max ? point.value : max,
+    );
 
     return SizedBox(
       height: height,
@@ -57,16 +63,23 @@ class EnergyLineChart extends StatelessWidget {
               ),
             ),
             titlesData: FlTitlesData(
-              topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-              rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+              topTitles: const AxisTitles(
+                sideTitles: SideTitles(showTitles: false),
+              ),
+              rightTitles: const AxisTitles(
+                sideTitles: SideTitles(showTitles: false),
+              ),
               leftTitles: AxisTitles(
                 sideTitles: SideTitles(
                   showTitles: true,
-                  reservedSize: 48,
+                  reservedSize: 52,
                   getTitlesWidget: (value, meta) {
                     return Text(
-                      Formatters.decimal(value, decimals: 3),
-                      style: const TextStyle(color: AppColors.mutedText, fontSize: 10),
+                      _axisLabelFor(value, mode),
+                      style: const TextStyle(
+                        color: AppColors.mutedText,
+                        fontSize: 10,
+                      ),
                     );
                   },
                 ),
@@ -78,12 +91,19 @@ class EnergyLineChart extends StatelessWidget {
                   interval: _bottomInterval(points.length),
                   getTitlesWidget: (value, meta) {
                     final index = value.round();
-                    if (index < 0 || index >= points.length) return const SizedBox.shrink();
+
+                    if (index < 0 || index >= points.length) {
+                      return const SizedBox.shrink();
+                    }
+
                     return Padding(
                       padding: const EdgeInsets.only(top: 8),
                       child: Text(
                         _labelFor(points[index], mode),
-                        style: const TextStyle(color: AppColors.mutedText, fontSize: 10),
+                        style: const TextStyle(
+                          color: AppColors.mutedText,
+                          fontSize: 10,
+                        ),
                       ),
                     );
                   },
@@ -94,14 +114,22 @@ class EnergyLineChart extends StatelessWidget {
               handleBuiltInTouches: true,
               touchTooltipData: LineTouchTooltipData(
                 tooltipRoundedRadius: 14,
-                tooltipPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                tooltipPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
                 getTooltipItems: (touchedSpots) {
                   return touchedSpots.map((spot) {
                     final index = spot.x.round();
-                    if (index < 0 || index >= points.length) return null;
+
+                    if (index < 0 || index >= points.length) {
+                      return null;
+                    }
+
                     final point = points[index];
+
                     return LineTooltipItem(
-                      '${Formatters.energy(point.value)}\n${_tooltipLabelFor(point, mode)}',
+                      '${_valueLabelFor(point.value, mode)}\n${_tooltipLabelFor(point, mode)}',
                       const TextStyle(
                         color: AppColors.white,
                         fontSize: 12,
@@ -140,16 +168,37 @@ class EnergyLineChart extends StatelessWidget {
     return (length / 6).ceilToDouble();
   }
 
+  String _axisLabelFor(double value, String mode) {
+    if (mode == 'day') {
+      return Formatters.decimal(value, decimals: 2);
+    }
+
+    return Formatters.decimal(value, decimals: 3);
+  }
+
+  String _valueLabelFor(double value, String mode) {
+    if (mode == 'day') {
+      return '${Formatters.decimal(value, decimals: 3)} kW';
+    }
+
+    return Formatters.energy(value);
+  }
+
   String _labelFor(HistoryPoint point, String mode) {
     final date = point.dateTime;
+
     if (date == null) return '';
+
     switch (mode) {
       case 'month':
         return DateFormat('dd/MM').format(date);
+
       case 'year':
         return DateFormat('MMM').format(date);
+
       case 'all':
         return DateFormat('yyyy').format(date);
+
       case 'day':
       case 'custom':
       default:
@@ -159,17 +208,23 @@ class EnergyLineChart extends StatelessWidget {
 
   String _tooltipLabelFor(HistoryPoint point, String mode) {
     final date = point.dateTime;
+
     if (date == null) return 'Période inconnue';
+
     switch (mode) {
       case 'month':
         return "Jour ${DateFormat('dd/MM/yyyy').format(date)}";
+
       case 'year':
         return "Mois ${DateFormat('MMM yyyy').format(date)}";
+
       case 'all':
         return "Année ${DateFormat('yyyy').format(date)}";
+
       case 'day':
+      case 'custom':
       default:
-        return "Jour ${DateFormat('dd/MM/yyyy HH:mm').format(date)}";
+        return "Heure ${DateFormat('dd/MM/yyyy HH:mm').format(date)}";
     }
   }
 }
@@ -196,7 +251,10 @@ class _StatusDonutChartState extends State<StatusDonutChart> {
   @override
   Widget build(BuildContext context) {
     final entries = widget.counts.entries.toList();
-    final total = widget.counts.values.fold<int>(0, (sum, value) => sum + value);
+    final total = widget.counts.values.fold<int>(
+      0,
+      (sum, value) => sum + value,
+    );
 
     if (total == 0) {
       return const SizedBox(
@@ -226,7 +284,9 @@ class _StatusDonutChartState extends State<StatusDonutChart> {
                       return;
                     }
 
-                    final index = response!.touchedSection!.touchedSectionIndex;
+                    final index =
+                        response!.touchedSection!.touchedSectionIndex;
+
                     if (index < 0 || index >= entries.length) {
                       setState(() => touchedIndex = null);
                       return;
@@ -234,8 +294,6 @@ class _StatusDonutChartState extends State<StatusDonutChart> {
 
                     setState(() => touchedIndex = index);
 
-                    // Important: un scroll / hover sur le graphe ne doit pas ouvrir
-                    // automatiquement la page Sites. On navigue seulement sur un vrai tap.
                     if (event is FlTapUpEvent) {
                       widget.onStatusTap(entries[index].key);
                     }
@@ -243,8 +301,10 @@ class _StatusDonutChartState extends State<StatusDonutChart> {
                 ),
                 sections: List.generate(entries.length, (index) {
                   final entry = entries[index];
-                  final selected = widget.selectedStatus == entry.key || touchedIndex == index;
+                  final selected =
+                      widget.selectedStatus == entry.key || touchedIndex == index;
                   final color = _statusColor(entry.key);
+
                   return PieChartSectionData(
                     value: entry.value.toDouble(),
                     color: color,
@@ -270,23 +330,34 @@ class _StatusDonutChartState extends State<StatusDonutChart> {
               children: entries.map((entry) {
                 final color = _statusColor(entry.key);
                 final active = widget.selectedStatus == entry.key;
+
                 return InkWell(
                   onTap: () => widget.onStatusTap(entry.key),
                   borderRadius: BorderRadius.circular(14),
                   child: Container(
                     margin: const EdgeInsets.only(bottom: 10),
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 10,
+                    ),
                     decoration: BoxDecoration(
                       color: active ? color.withOpacity(0.10) : Colors.transparent,
                       borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: active ? color.withOpacity(0.22) : AppColors.borderGray),
+                      border: Border.all(
+                        color: active
+                            ? color.withOpacity(0.22)
+                            : AppColors.borderGray,
+                      ),
                     ),
                     child: Row(
                       children: [
                         Container(
                           width: 9,
                           height: 9,
-                          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+                          decoration: BoxDecoration(
+                            color: color,
+                            shape: BoxShape.circle,
+                          ),
                         ),
                         const SizedBox(width: 8),
                         Expanded(
@@ -322,8 +393,10 @@ class _StatusDonutChartState extends State<StatusDonutChart> {
     switch (status) {
       case 'healthy':
         return AppColors.healthy;
+
       case 'faulty':
         return AppColors.faulty;
+
       default:
         return AppColors.offline;
     }
@@ -333,8 +406,10 @@ class _StatusDonutChartState extends State<StatusDonutChart> {
     switch (status) {
       case 'healthy':
         return 'Healthy';
+
       case 'faulty':
         return 'Faulty';
+
       default:
         return 'Offline';
     }

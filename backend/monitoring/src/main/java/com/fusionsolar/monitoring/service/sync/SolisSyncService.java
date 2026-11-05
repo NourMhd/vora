@@ -94,6 +94,7 @@ public class SolisSyncService implements MonitoringSitesSyncService {
     int reactivatedCount = 0;
     int deactivatedCount = 0;
     int invalidCount = 0;
+    int statesNotRefreshed = 0;
 
     try {
         List<SiteSummaryDto> summaries = solisMonitoringProvider.getSitesSummary();
@@ -107,6 +108,7 @@ public class SolisSyncService implements MonitoringSitesSyncService {
                 continue;
             }
 
+            if (summary.getStatus() == null || "unknown".equalsIgnoreCase(summary.getStatus()) || summary.getStatus().isBlank()) statesNotRefreshed++;
             String siteCode = summary.getSiteCode().trim();
             summary.setSiteCode(siteCode);
 
@@ -129,6 +131,7 @@ public class SolisSyncService implements MonitoringSitesSyncService {
 
                 document.setActive(true);
                 document.setMissingSince(null);
+                document.setMissingConfirmations(0);
                 document.setDeletedAt(null);
                 document.setUpdatedAt(now);
 
@@ -145,16 +148,17 @@ public class SolisSyncService implements MonitoringSitesSyncService {
             }
         }
 
-        deactivatedCount = deactivateMissingSites(
+        deactivatedCount = failedSaveCount == 0 && invalidCount == 0 ? deactivateMissingSites(
                 Brand.SOLIS,
                 receivedSiteCodes,
                 now
-        );
+        ) : 0;
 
         Map<String, Object> stats = new HashMap<>();
         stats.put("receivedFromProvider", summaries.size());
         stats.put("validReceived", receivedSiteCodes.size());
         stats.put("invalid", invalidCount);
+        stats.put("statesNotRefreshed", statesNotRefreshed);
         stats.put("saved", savedCount);
         stats.put("failedToSave", failedSaveCount);
         stats.put("reactivated", reactivatedCount);
@@ -162,7 +166,7 @@ public class SolisSyncService implements MonitoringSitesSyncService {
         stats.put("minimumRefreshIntervalMs", minSummaryRefreshIntervalMs);
         stats.put("pollStartedAt", startedAt.toString());
 
-        boolean fullSuccess = failedSaveCount == 0 && invalidCount == 0;
+        boolean fullSuccess = failedSaveCount == 0 && invalidCount == 0 && statesNotRefreshed == 0;
 
         run.setStatus(fullSuccess ? SyncStatus.SUCCESS : SyncStatus.PARTIAL_SUCCESS);
         run.setMessage("Solis sync completed");
@@ -205,12 +209,8 @@ public class SolisSyncService implements MonitoringSitesSyncService {
             Set<String> receivedSiteCodes,
             Instant now
     ) {
-        /*
-         * Sécurité:
-         * Si SolisCloud retourne une liste vide à cause d'un 429,
-         * d'un timeout ou d'une réponse partielle, on ne désactive pas tous les sites.
-         */
-        if (receivedSiteCodes == null || receivedSiteCodes.isEmpty()) {
+        // Called only after the strict provider inventory completed successfully.
+        if (receivedSiteCodes == null) {
             log.warn("Solis missing-site deactivation skipped because provider returned no valid site codes.");
             return 0;
         }
@@ -234,17 +234,12 @@ public class SolisSyncService implements MonitoringSitesSyncService {
                 continue;
             }
 
-            site.setActive(false);
-            site.setSwapDate(null);
-            site.setMissingSince(site.getMissingSince() != null ? site.getMissingSince() : now);
-            site.setDeletedAt(now);
-            site.setUpdatedAt(now);
-
+            boolean confirmed = SiteMissingPolicy.confirmMissing(site, now);
             siteRepository.save(site);
-            deactivated++;
+            if (confirmed) deactivated++;
 
-            log.warn(
-                    "Solis site {} marked inactive because it is no longer returned by SolisCloud.",
+            if (confirmed) log.warn(
+                    "Solis site {} marked inactive after two complete inventories without it.",
                     siteCode
             );
         }

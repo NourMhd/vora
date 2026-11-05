@@ -12,5 +12,7 @@ public class StationListResponse {
     @Data
     public static class DataContainer {
         private List<StationItemDto> list;
+        private Integer total;
+        private Integer totalCount;
     }
 }

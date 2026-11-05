@@ -8,9 +8,9 @@ import '../../../core/widgets/loading_state.dart';
 import '../../../core/widgets/premium_card.dart';
 import '../../../data/models/daily_comparison_report.dart';
 import '../controllers/comparatif_controller.dart';
-
-const double _dateColumnWidth = 130;
-const double _siteColumnWidth = 230;
+import '../widgets/comparison_charts.dart';
+import '../widgets/site_selection_dialog.dart';
+import '../widgets/sticky_comparison_table.dart';
 
 class ComparatifPage extends GetView<ComparatifController> {
   const ComparatifPage({super.key});
@@ -34,38 +34,62 @@ class ComparatifPage extends GetView<ComparatifController> {
         body: SafeArea(
           child: RefreshIndicator(
             onRefresh: controller.refreshData,
-            child: ListView(
-              padding: const EdgeInsets.all(24),
-              children: [
-                _Header(report: report, controller: controller),
-                const SizedBox(height: 18),
-                _SiteSelectorCard(controller: controller),
-                const SizedBox(height: 18),
-                if (report.sites.isEmpty)
-                  const EmptyState(
-                    title: 'Aucun site sélectionné',
-                    message: 'Sélectionne au moins un site ARI puis clique sur Appliquer.',
-                    icon: Icons.check_box_outline_blank_rounded,
-                  )
-                else ...[
-                  _InfoStrip(report: report),
-                  const SizedBox(height: 18),
-                  _ComparisonTableCard(
-                    title: 'Tableau historique original',
-                    subtitle: 'Valeurs journalières telles qu’elles existent dans l’historique collecté, sans estimation.',
-                    rows: report.historicalRows,
-                    totalRow: report.historicalTotals,
-                    sites: report.sites,
+            child: CustomScrollView(
+              slivers: [
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(24, 24, 24, 18),
+                  sliver: SliverList.list(
+                    children: [
+                      _Header(report: report, controller: controller),
+                      const SizedBox(height: 18),
+                      _SiteSelectorCard(controller: controller),
+                      if (error != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 12),
+                          child: Text(
+                            error,
+                            style: const TextStyle(color: Colors.red),
+                          ),
+                        ),
+                      const SizedBox(height: 18),
+                      if (report.sites.isEmpty)
+                        const EmptyState(
+                          title: 'Commencez par choisir vos sites',
+                          message:
+                              'Choisissez les sites, puis lancez la comparaison.',
+                          icon: Icons.compare_arrows,
+                        )
+                      else
+                        ComparisonCharts(report: report),
+                    ],
                   ),
-                  const SizedBox(height: 18),
-                  _ComparisonTableCard(
-                    title: 'Tableau avec valeurs estimables',
-                    subtitle: 'Estime seulement les jours 0, null ou absents : (moyenne réelle du mois + théorique du jour) / 2, sinon 70% du théorique.',
-                    rows: report.estimatedRows,
-                    totalRow: report.estimatedTotals,
-                    sites: report.sites,
+                ),
+                if (report.sites.isNotEmpty) ...[
+                  SliverPadding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    sliver: StickyComparisonTable(
+                      title: 'Production réelle · kWh',
+                      subtitle:
+                          'Historique collecté, sans estimation. Les noms des sites et les dates restent visibles pendant le défilement.',
+                      rows: report.historicalRows,
+                      totalRow: report.historicalTotals,
+                      sites: report.sites,
+                    ),
+                  ),
+                  const SliverToBoxAdapter(child: SizedBox(height: 24)),
+                  SliverPadding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    sliver: StickyComparisonTable(
+                      title: 'Production avec estimation · kWh',
+                      subtitle:
+                          'Les valeurs estimées sont en orange. Calcul existant : (moyenne réelle du mois + théorique du jour) / 2 ; à défaut, 70 % du théorique.',
+                      rows: report.estimatedRows,
+                      totalRow: report.estimatedTotals,
+                      sites: report.sites,
+                    ),
                   ),
                 ],
+                const SliverToBoxAdapter(child: SizedBox(height: 32)),
               ],
             ),
           ),
@@ -77,246 +101,183 @@ class ComparatifPage extends GetView<ComparatifController> {
 
 class _Header extends StatelessWidget {
   const _Header({required this.report, required this.controller});
-
   final DailyComparisonReport report;
   final ComparatifController controller;
-
   @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Comparatif',
-                style: TextStyle(
-                  color: AppColors.midnightNavy,
-                  fontSize: 28,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                '${_siteNames(report.sites)} · du ${_displayIsoDate(report.startDate)} au ${_displayIsoDate(report.endDate)} · jour présent exclu',
-                style: const TextStyle(
-                  color: AppColors.mutedText,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
+  Widget build(BuildContext context) => Wrap(
+    spacing: 18,
+    runSpacing: 12,
+    alignment: WrapAlignment.spaceBetween,
+    crossAxisAlignment: WrapCrossAlignment.center,
+    children: [
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Comparer la production',
+            style: TextStyle(
+              color: AppColors.midnightNavy,
+              fontSize: 26,
+              fontWeight: FontWeight.w700,
+            ),
           ),
-        ),
-        Obx(
-          () => OutlinedButton.icon(
-            onPressed: controller.isRefreshing.value ? null : controller.refreshData,
-            icon: controller.isRefreshing.value
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.refresh_rounded),
+          const SizedBox(height: 5),
+          Text(
+            report.sites.isEmpty
+                ? 'Choisissez vos sites et votre période.'
+                : '${report.sites.length} sites · ${_displayIsoDate(report.startDate)} — ${_displayIsoDate(report.endDate)}',
+            style: const TextStyle(color: AppColors.mutedText),
+          ),
+        ],
+      ),
+      Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          OutlinedButton.icon(
+            onPressed: controller.isRefreshing.value
+                ? null
+                : controller.refreshData,
+            icon: const Icon(Icons.refresh, size: 18),
             label: const Text('Actualiser'),
           ),
-        ),
-        const SizedBox(width: 10),
-        FilledButton.icon(
-          onPressed: report.sites.isEmpty ? null : () => _exportExcel(report),
-          icon: const Icon(Icons.file_download_outlined, size: 18),
-          label: const Text('Télécharger Excel'),
-        ),
-      ],
-    );
-  }
-}
-
-class _InfoStrip extends StatelessWidget {
-  const _InfoStrip({required this.report});
-
-  final DailyComparisonReport report;
-
-  @override
-  Widget build(BuildContext context) {
-    return Wrap(
-      spacing: 12,
-      runSpacing: 12,
-      children: report.sites.map((site) {
-        return Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: AppColors.white,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: AppColors.borderGray),
+          OutlinedButton.icon(
+            onPressed: report.sites.isEmpty ? null : () => _exportExcel(report),
+            icon: const Icon(Icons.download, size: 18),
+            label: const Text('Exporter Excel'),
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.solar_power_rounded, color: AppColors.deepTeal, size: 18),
-              const SizedBox(width: 8),
-              Text(
-                site.label,
-                style: const TextStyle(
-                  color: AppColors.midnightNavy,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                '${site.powerLabel} · swap: ${_displayIsoDate(site.swapDate)}',
-                style: const TextStyle(
-                  color: AppColors.mutedText,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
-          ),
-        );
-      }).toList(),
-    );
-  }
+        ],
+      ),
+    ],
+  );
 }
-
 
 class _SiteSelectorCard extends StatelessWidget {
   const _SiteSelectorCard({required this.controller});
-
   final ComparatifController controller;
+  Future<void> choose(BuildContext context) async {
+    final result = await showDialog<Set<String>>(
+      context: context,
+      builder: (_) => SiteSelectionDialog(
+        sites: controller.availableSites.toList(),
+        selected: Set.of(controller.selectedSiteCodes),
+      ),
+    );
+    if (result != null) controller.selectedSiteCodes.assignAll(result);
+  }
 
   @override
-  Widget build(BuildContext context) {
-    return PremiumCard(
-      padding: const EdgeInsets.all(18),
-      child: Obx(() {
-        final sites = controller.availableSites.toList();
-        final selectedCount = controller.selectedSiteCodes.length;
-
-        if (sites.isEmpty) {
-          return const Text(
-            'Aucun site ARI disponible pour la sélection.',
-            style: TextStyle(
-              color: AppColors.mutedText,
-              fontWeight: FontWeight.w700,
-            ),
-          );
-        }
-
-        final grouped = _groupSelectableSites(sites);
-
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+  Widget build(BuildContext context) => PremiumCard(
+    padding: const EdgeInsets.all(18),
+    child: Obx(() {
+      final selected = controller.availableSites
+          .where((s) => controller.isSelected(s.siteCode))
+          .toList();
+      final loaded = controller.report.value.sites
+          .map((s) => s.siteCode)
+          .toSet();
+      final pending =
+          loaded.length != selected.length ||
+          selected.any((s) => !loaded.contains(s.siteCode)) ||
+          (controller.selectedStartDate.value != null &&
+              Formatters.apiDay(controller.selectedStartDate.value!) !=
+                  controller.report.value.startDate) ||
+          (controller.selectedEndDate.value != null &&
+              Formatters.apiDay(controller.selectedEndDate.value!) !=
+                  controller.report.value.endDate);
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 16,
+            runSpacing: 10,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              const Text(
+                '1. Sites à comparer',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+              ),
+              OutlinedButton.icon(
+                onPressed: controller.isRefreshing.value
+                    ? null
+                    : () => choose(context),
+                icon: const Icon(Icons.add_location_alt_outlined, size: 18),
+                label: Text('Choisir les sites (${selected.length})'),
+              ),
+              if (pending)
+                const Text(
+                  'Filtres modifiés · lancez la comparaison',
+                  style: TextStyle(color: AppColors.deepTeal, fontSize: 12),
+                ),
+            ],
+          ),
+          if (selected.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
               children: [
-                const Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Sites à comparer',
-                        style: TextStyle(
-                          color: AppColors.midnightNavy,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w900,
+                ...selected
+                    .take(8)
+                    .map(
+                      (s) => InputChip(
+                        label: Text(s.label),
+                        avatar: Icon(
+                          Icons.circle,
+                          size: 9,
+                          color: comparisonSiteColor(s.siteCode),
                         ),
+                        onDeleted: controller.isRefreshing.value
+                            ? null
+                            : () => controller.toggleSite(s.siteCode, false),
                       ),
-                      SizedBox(height: 4),
-                      Text(
-                        'Liste organisée par zone, gouvernorat, puis puissance crête décroissante.',
-                        style: TextStyle(
-                          color: AppColors.mutedText,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ],
+                    ),
+                if (selected.length > 8)
+                  ActionChip(
+                    label: Text('+ ${selected.length - 8} sites'),
+                    onPressed: () => choose(context),
                   ),
-                ),
-                Text(
-                  '$selectedCount sélectionné(s)',
-                  style: const TextStyle(
-                    color: AppColors.deepTeal,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                FilledButton.icon(
-                  onPressed: controller.isRefreshing.value ? null : controller.applySelection,
-                  icon: const Icon(Icons.check_rounded, size: 18),
-                  label: const Text('Appliquer'),
-                ),
               ],
             ),
-            const SizedBox(height: 16),
-            _DateRangeFilter(controller: controller),
-            const SizedBox(height: 12),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 360),
-              child: Scrollbar(
-                thumbVisibility: true,
-                child: ListView(
-                  shrinkWrap: true,
-                  children: grouped.entries.map((zoneEntry) {
-                    final zone = zoneEntry.key;
-                    final governorates = zoneEntry.value;
-                    return ExpansionTile(
-                      initiallyExpanded: true,
-                      tilePadding: EdgeInsets.zero,
-                      title: Text(
-                        zone,
-                        style: const TextStyle(
-                          color: AppColors.midnightNavy,
-                          fontWeight: FontWeight.w900,
+          ],
+          const SizedBox(height: 16),
+          _DateRangeFilter(controller: controller),
+          const SizedBox(height: 14),
+          Wrap(
+            spacing: 16,
+            runSpacing: 10,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              FilledButton.icon(
+                onPressed: controller.isRefreshing.value || selected.isEmpty
+                    ? null
+                    : controller.applySelection,
+                icon: controller.isRefreshing.value
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
                         ),
-                      ),
-                      children: governorates.entries.map((govEntry) {
-                        final governorate = govEntry.key;
-                        final govSites = govEntry.value;
-                        return ExpansionTile(
-                          initiallyExpanded: true,
-                          tilePadding: const EdgeInsets.only(left: 16),
-                          childrenPadding: const EdgeInsets.only(left: 16),
-                          title: Text(
-                            governorate,
-                            style: const TextStyle(
-                              color: AppColors.slateGraphite,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
-                          children: govSites.map((site) {
-                            return CheckboxListTile(
-                              dense: true,
-                              contentPadding: EdgeInsets.zero,
-                              value: controller.isSelected(site.siteCode),
-                              onChanged: (value) => controller.toggleSite(site.siteCode, value == true),
-                              title: Text(
-                                site.label,
-                                style: const TextStyle(
-                                  color: AppColors.midnightNavy,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                              subtitle: Text(
-                                '${site.powerLabel} · swap: ${_displayIsoDate(site.swapDate)}',
-                                style: const TextStyle(
-                                  color: AppColors.mutedText,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            );
-                          }).toList(),
-                        );
-                      }).toList(),
-                    );
-                  }).toList(),
+                      )
+                    : const Icon(Icons.compare_arrows, size: 18),
+                label: Text(
+                  controller.isRefreshing.value
+                      ? 'Chargement…'
+                      : 'Comparer ${selected.length} sites',
                 ),
               ),
-            ),
-          ],
-        );
-      }),
-    );
-  }
+              const Text(
+                'Journées terminées uniquement · aujourd’hui exclu',
+                style: TextStyle(color: AppColors.mutedText, fontSize: 12),
+              ),
+            ],
+          ),
+        ],
+      );
+    }),
+  );
 }
 
 class _DateRangeFilter extends StatelessWidget {
@@ -341,7 +302,7 @@ class _DateRangeFilter extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            'Période de comparaison',
+            '2. Période',
             style: TextStyle(
               color: AppColors.midnightNavy,
               fontWeight: FontWeight.w900,
@@ -349,7 +310,7 @@ class _DateRangeFilter extends StatelessWidget {
           ),
           const SizedBox(height: 4),
           const Text(
-            'Par défaut, le comparatif commence à la date de swap la plus ancienne des sites sélectionnés et se termine hier.',
+            'Choisissez une période ou conservez les dates automatiques.',
             style: TextStyle(
               color: AppColors.mutedText,
               fontSize: 12,
@@ -362,11 +323,22 @@ class _DateRangeFilter extends StatelessWidget {
             runSpacing: 12,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
+              ...[7, 30, 90].map(
+                (days) => OutlinedButton(
+                  onPressed: () {
+                    controller.setEndDate(yesterday);
+                    controller.setStartDate(
+                      yesterday.subtract(Duration(days: days - 1)),
+                    );
+                  },
+                  child: Text('$days jours'),
+                ),
+              ),
               _NullableDatePickerButton(
                 width: 190,
                 label: 'Date début',
                 value: startDate,
-                placeholder: 'Auto: swap le + ancien',
+                placeholder: 'Depuis le premier swap',
                 firstDate: DateTime(2000, 1, 1),
                 lastDate: endDate ?? yesterday,
                 fallbackDate: endDate ?? yesterday,
@@ -383,9 +355,11 @@ class _DateRangeFilter extends StatelessWidget {
                 onSelected: controller.setEndDate,
               ),
               OutlinedButton.icon(
-                onPressed: startDate == null && endDate == null ? null : controller.clearDateRange,
+                onPressed: startDate == null && endDate == null
+                    ? null
+                    : controller.clearDateRange,
                 icon: const Icon(Icons.restart_alt_rounded, size: 18),
-                label: const Text('Réinitialiser période'),
+                label: const Text('Automatique'),
               ),
             ],
           ),
@@ -446,7 +420,9 @@ class _NullableDatePickerButton extends StatelessWidget {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              color: value == null ? AppColors.mutedText : AppColors.midnightNavy,
+              color: value == null
+                  ? AppColors.mutedText
+                  : AppColors.midnightNavy,
               fontWeight: FontWeight.w800,
             ),
           ),
@@ -462,187 +438,6 @@ DateTime _clampDate(DateTime value, DateTime firstDate, DateTime lastDate) {
   return value;
 }
 
-class _ComparisonTableCard extends StatelessWidget {
-  const _ComparisonTableCard({
-    required this.title,
-    required this.subtitle,
-    required this.rows,
-    required this.totalRow,
-    required this.sites,
-  });
-
-  final String title;
-  final String subtitle;
-  final List<DailyComparisonRow> rows;
-  final DailyComparisonRow? totalRow;
-  final List<DailyComparisonSite> sites;
-
-  @override
-  Widget build(BuildContext context) {
-    final allRows = [
-      ...rows,
-      if (totalRow != null) totalRow!,
-    ];
-
-    return PremiumCard(
-      padding: EdgeInsets.zero,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(22, 22, 22, 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: AppColors.midnightNavy,
-                    fontSize: 20,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  subtitle,
-                  style: const TextStyle(
-                    color: AppColors.mutedText,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const Divider(height: 1, color: AppColors.borderGray),
-          if (allRows.isEmpty)
-            const SizedBox(
-              height: 180,
-              child: EmptyState(
-                title: 'Aucune ligne',
-                message: 'Aucune journée complète disponible pour cette période.',
-                icon: Icons.table_rows_outlined,
-              ),
-            )
-          else
-            Scrollbar(
-              thumbVisibility: true,
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.only(bottom: 12),
-                child: DataTable(
-                  headingRowColor: MaterialStateProperty.all(AppColors.softWhite),
-                  dataRowMinHeight: 44,
-                  dataRowMaxHeight: 66,
-                  columnSpacing: 24,
-                  horizontalMargin: 22,
-                  columns: [
-                    const DataColumn(
-                      label: SizedBox(
-                        width: _dateColumnWidth,
-                        child: _HeaderLabel('Date'),
-                      ),
-                    ),
-                    ...sites.map(
-                      (site) => DataColumn(
-                        label: SizedBox(
-                          width: _siteColumnWidth,
-                          child: _HeaderLabel(site.headerLabel),
-                        ),
-                      ),
-                    ),
-                  ],
-                  rows: allRows.map((row) {
-                    final isTotal = row.label.toUpperCase() == 'TOTAL';
-                    return DataRow(
-                      color: isTotal ? MaterialStateProperty.all(AppColors.tealSoft) : null,
-                      cells: [
-                        DataCell(
-                          SizedBox(
-                            width: _dateColumnWidth,
-                            child: Text(
-                              row.label,
-                              style: TextStyle(
-                                color: AppColors.midnightNavy,
-                                fontWeight: isTotal ? FontWeight.w900 : FontWeight.w800,
-                              ),
-                            ),
-                          ),
-                        ),
-                        ...sites.map((site) {
-                          final cell = _cellFor(row, site.siteCode);
-                          return DataCell(
-                            SizedBox(
-                              width: _siteColumnWidth,
-                              child: _ValueText(cell: cell, isTotal: isTotal),
-                            ),
-                          );
-                        }),
-                      ],
-                    );
-                  }).toList(),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _HeaderLabel extends StatelessWidget {
-  const _HeaderLabel(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Text(
-      text,
-      maxLines: 2,
-      overflow: TextOverflow.visible,
-      softWrap: true,
-      style: const TextStyle(
-        color: AppColors.midnightNavy,
-        fontWeight: FontWeight.w900,
-      ),
-    );
-  }
-}
-
-class _ValueText extends StatelessWidget {
-  const _ValueText({required this.cell, required this.isTotal});
-
-  final DailyComparisonCell? cell;
-  final bool isTotal;
-
-  @override
-  Widget build(BuildContext context) {
-    final value = cell?.displayValue ?? '—';
-    final estimated = cell?.estimated == true;
-    final status = cell?.status ?? '';
-    final notSwapped = status == 'NOT_SWAPPED_YET';
-
-    return Text(
-      value,
-      textAlign: TextAlign.left,
-      maxLines: 2,
-      overflow: TextOverflow.visible,
-      softWrap: true,
-      style: TextStyle(
-        color: isTotal
-            ? AppColors.midnightNavy
-            : estimated
-                ? AppColors.warning
-                : notSwapped
-                    ? AppColors.mutedText
-                    : AppColors.slateGraphite,
-        fontWeight: isTotal || estimated ? FontWeight.w900 : FontWeight.w700,
-        fontStyle: notSwapped ? FontStyle.italic : FontStyle.normal,
-      ),
-    );
-  }
-}
-
 DailyComparisonCell? _cellFor(DailyComparisonRow row, String siteCode) {
   for (final cell in row.cells) {
     if (cell.siteCode == siteCode) return cell;
@@ -650,40 +445,8 @@ DailyComparisonCell? _cellFor(DailyComparisonRow row, String siteCode) {
   return null;
 }
 
-String _siteNames(List<DailyComparisonSite> sites) {
-  if (sites.isEmpty) return 'Sites ARI';
-  if (sites.length == 1) return sites.first.label;
-  final labels = sites.map((site) => site.label).toList();
-  return '${labels.take(labels.length - 1).join(', ')} et ${labels.last}';
-}
-
-
-Map<String, Map<String, List<DailyComparisonSelectableSite>>> _groupSelectableSites(
-  List<DailyComparisonSelectableSite> sites,
-) {
-  final result = <String, Map<String, List<DailyComparisonSelectableSite>>>{};
-  for (final site in sites) {
-    final zone = site.zone ?? 'Zone inconnue';
-    final governorate = site.governorate ?? 'Gouvernorat inconnu';
-    result.putIfAbsent(zone, () => <String, List<DailyComparisonSelectableSite>>{});
-    result[zone]!.putIfAbsent(governorate, () => <DailyComparisonSelectableSite>[]);
-    result[zone]![governorate]!.add(site);
-  }
-
-  for (final zoneEntry in result.entries) {
-    for (final govEntry in zoneEntry.value.entries) {
-      govEntry.value.sort((left, right) {
-        final powerCompare = (right.installedPowerKw ?? 0).compareTo(left.installedPowerKw ?? 0);
-        if (powerCompare != 0) return powerCompare;
-        return left.label.compareTo(right.label);
-      });
-    }
-  }
-
-  return result;
-}
-
-String _excelSiteHeader(DailyComparisonSite site) => '${site.label} (${site.powerLabel})';
+String _excelSiteHeader(DailyComparisonSite site) =>
+    '${site.label} (${site.powerLabel})';
 
 String _displayIsoDate(String? value) {
   if (value == null || value.trim().isEmpty) return '—';
@@ -728,7 +491,8 @@ Future<void> _exportExcel(DailyComparisonReport report) async {
     );
 
     final now = DateTime.now();
-    final stamp = '${now.year}'
+    final stamp =
+        '${now.year}'
         '${now.month.toString().padLeft(2, '0')}'
         '${now.day.toString().padLeft(2, '0')}_'
         '${now.hour.toString().padLeft(2, '0')}'
@@ -773,12 +537,18 @@ void _appendTable(
   if (totalRow != null) {
     sheet.appendRow([
       xlsx.TextCellValue('TOTAL'),
-      ...sites.map((site) => _excelCell(_cellFor(totalRow, site.siteCode), forceNumber: true)),
+      ...sites.map(
+        (site) =>
+            _excelCell(_cellFor(totalRow, site.siteCode), forceNumber: true),
+      ),
     ]);
   }
 }
 
-xlsx.CellValue _excelCell(DailyComparisonCell? cell, {bool forceNumber = false}) {
+xlsx.CellValue _excelCell(
+  DailyComparisonCell? cell, {
+  bool forceNumber = false,
+}) {
   if (cell == null) return xlsx.TextCellValue('—');
   if ((forceNumber || !cell.estimated) && cell.value != null) {
     return xlsx.DoubleCellValue(cell.value!);

@@ -72,6 +72,7 @@ class SiteDetailsController extends GetxController {
     return _isSolis ? FrontSyncPolicy.solisLive : FrontSyncPolicy.liveFast;
   }
 
+  bool _historyDefaultApplied = false;
   int _siteRevision = 0;
   int _historyRequestVersion = 0;
 
@@ -143,6 +144,7 @@ class SiteDetailsController extends GetxController {
     }
 
     _siteRevision++;
+    _historyDefaultApplied = false;
     _historyRequestVersion++;
     _frontHistoryCache.clear();
 
@@ -176,80 +178,85 @@ class SiteDetailsController extends GetxController {
   }
 
   Future<void> load({bool force = false}) async {
-  try {
-    isLoading.value = true;
-    errorMessage.value = null;
+    try {
+      isLoading.value = true;
+      errorMessage.value = null;
 
-    await _fetchBase(
-      silent: false,
-      force: force,
-      applyCurrentHistoryFromFull: true,
-    );
-
-    await _loadSelectedHistory(
-      exposeErrors: false,
-      useFrontCache: true,
-    );
-
-    // Charge la comparaison automatiquement pour afficher la card
-    // sans attendre le clic sur "Description site".
-    await loadSiteDescription(
-      force: force,
-      showFeedback: false,
-    );
-  } on ApiException catch (e) {
-    errorMessage.value = e.message;
-  } catch (_) {
-    errorMessage.value = 'Impossible de charger le détail du site.';
-  } finally {
-    isLoading.value = false;
-  }
-}
-
-
- Future<void> loadSiteDescription({
-  bool force = false,
-  bool showFeedback = true,
-}) async {
-  if (!force && siteDescription.value != null) return;
-
-  try {
-    isDescriptionLoading.value = true;
-    descriptionErrorMessage.value = null;
-
-    siteDescription.value = await _repository.getSiteDescription(
-      brand: brand,
-      siteCode: siteCode,
-    );
-  } on ApiException catch (e) {
-    descriptionErrorMessage.value = e.message;
-
-    if (showFeedback) {
-      Get.snackbar(
-        'Description site indisponible',
-        e.message,
-        snackPosition: SnackPosition.BOTTOM,
-        margin: const EdgeInsets.all(16),
-        borderRadius: 16,
+      await _fetchBase(
+        silent: false,
+        force: force,
+        applyCurrentHistoryFromFull: true,
       );
-    }
-  } catch (_) {
-    const message = 'Impossible de charger la description du site.';
-    descriptionErrorMessage.value = message;
 
-    if (showFeedback) {
-      Get.snackbar(
-        'Description site indisponible',
-        message,
-        snackPosition: SnackPosition.BOTTOM,
-        margin: const EdgeInsets.all(16),
-        borderRadius: 16,
+      if (!_historyDefaultApplied) {
+        final revision = _siteRevision;
+        final latest = await _latestCollectedCursor(chartMode.value);
+        if (revision != _siteRevision) return;
+        if (latest != null) chartCursor.value = latest;
+        _historyDefaultApplied = true;
+      }
+
+      await _loadSelectedHistory(
+        exposeErrors: false,
+        useFrontCache: true,
       );
+
+      await loadSiteDescription(
+        force: force,
+        showFeedback: false,
+      );
+    } on ApiException catch (e) {
+      errorMessage.value = e.message;
+    } catch (_) {
+      errorMessage.value = 'Impossible de charger le détail du site.';
+    } finally {
+      isLoading.value = false;
     }
-  } finally {
-    isDescriptionLoading.value = false;
   }
-}
+
+  Future<void> loadSiteDescription({
+    bool force = false,
+    bool showFeedback = true,
+  }) async {
+    if (!force && siteDescription.value != null) return;
+
+    try {
+      isDescriptionLoading.value = true;
+      descriptionErrorMessage.value = null;
+
+      siteDescription.value = await _repository.getSiteDescription(
+        brand: brand,
+        siteCode: siteCode,
+      );
+    } on ApiException catch (e) {
+      descriptionErrorMessage.value = e.message;
+
+      if (showFeedback) {
+        Get.snackbar(
+          'Description site indisponible',
+          e.message,
+          snackPosition: SnackPosition.BOTTOM,
+          margin: const EdgeInsets.all(16),
+          borderRadius: 16,
+        );
+      }
+    } catch (_) {
+      const message = 'Impossible de charger la description du site.';
+      descriptionErrorMessage.value = message;
+
+      if (showFeedback) {
+        Get.snackbar(
+          'Description site indisponible',
+          message,
+          snackPosition: SnackPosition.BOTTOM,
+          margin: const EdgeInsets.all(16),
+          borderRadius: 16,
+        );
+      }
+    } finally {
+      isDescriptionLoading.value = false;
+    }
+  }
 
   Future<bool> saveSiteDescription({
     required String note,
@@ -260,6 +267,7 @@ class SiteDetailsController extends GetxController {
     try {
       isDescriptionSaving.value = true;
       descriptionErrorMessage.value = null;
+
       siteDescription.value = await _repository.saveSiteDescription(
         brand: brand,
         siteCode: siteCode,
@@ -268,6 +276,7 @@ class SiteDetailsController extends GetxController {
         retainedPhotoIds: retainedPhotoIds,
         photosToAdd: photosToAdd,
       );
+
       Get.snackbar(
         'Description enregistrée',
         'Les informations du site ont été mises à jour.',
@@ -275,9 +284,11 @@ class SiteDetailsController extends GetxController {
         margin: const EdgeInsets.all(16),
         borderRadius: 16,
       );
+
       return true;
     } on ApiException catch (e) {
       descriptionErrorMessage.value = e.message;
+
       Get.snackbar(
         'Enregistrement impossible',
         e.message,
@@ -288,6 +299,7 @@ class SiteDetailsController extends GetxController {
     } catch (_) {
       const message = 'Impossible d’enregistrer la description du site.';
       descriptionErrorMessage.value = message;
+
       Get.snackbar(
         'Enregistrement impossible',
         message,
@@ -298,6 +310,7 @@ class SiteDetailsController extends GetxController {
     } finally {
       isDescriptionSaving.value = false;
     }
+
     return false;
   }
 
@@ -343,6 +356,10 @@ class SiteDetailsController extends GetxController {
         force: false,
         applyCurrentHistoryFromFull: false,
       );
+      // Missing periods are now collected asynchronously by the backend.
+      if (!isHistoryLoading.value) {
+        await _loadSelectedHistory(exposeErrors: false, useFrontCache: false);
+      }
     } catch (_) {
       // Refresh silencieux : on garde les dernières données visibles.
     }
@@ -364,21 +381,15 @@ class SiteDetailsController extends GetxController {
     try {
       if (!silent) errorMessage.value = null;
 
-      /*
-       * P0:
-       * Le refresh silencieux ne demande que le détail Mongo.
-       * Il ne doit pas déclencher /full avec historiques.
-       */
-      final Future<dynamic> siteFuture =
-          silent && !applyCurrentHistoryFromFull
-              ? _repository.getSiteDetail(
-                  brand: currentBrand,
-                  siteCode: currentSiteCode,
-                )
-              : _repository.getSiteFull(
-                  brand: currentBrand,
-                  siteCode: currentSiteCode,
-                );
+      final Future<dynamic> siteFuture = silent && !applyCurrentHistoryFromFull
+          ? _repository.getSiteDetail(
+              brand: currentBrand,
+              siteCode: currentSiteCode,
+            )
+          : _repository.getSiteFull(
+              brand: currentBrand,
+              siteCode: currentSiteCode,
+            );
 
       final responses = await Future.wait<dynamic>([
         siteFuture,
@@ -481,24 +492,32 @@ class SiteDetailsController extends GetxController {
     }
   }
 
+  Future<DateTime?> _latestCollectedCursor(String mode) async {
+    try {
+      final buckets = await _repository.getLatestCollectedPeriods(brand: brand, siteCode: siteCode);
+      final bucket = buckets[mode];
+      if (bucket == null || bucket.isEmpty) return null;
+      return DateTime.tryParse(mode == 'year' ? '$bucket-01-01' : mode == 'month' ? '$bucket-01' : bucket);
+    } catch (_) {
+      // Older backend or no collected data: keep the existing current-period fallback.
+      return null;
+    }
+  }
+
   Future<void> loadChartMode(String mode) async {
     if (mode != 'day' && mode != 'month' && mode != 'year') return;
     if (isHistoryLoading.value) return;
 
     final oldMode = chartMode.value;
 
-    // Si l'utilisateur clique sur le même filtre déjà actif, on ne recharge pas.
     if (oldMode == mode) {
       return;
     }
 
-    /*
-     * Quand on change Day / Month / Year, on revient à la période actuelle.
-     * Day   => aujourd'hui
-     * Month => mois actuel
-     * Year  => année actuelle
-     */
-    final nextCursor = _normalizedCurrentCursor(mode);
+    final revision = _siteRevision;
+    final latest = await _latestCollectedCursor(mode);
+    if (revision != _siteRevision || chartMode.value != oldMode) return;
+    final nextCursor = latest ?? _normalizedCurrentCursor(mode);
     final nextBucket = _bucketFor(nextCursor, mode);
 
     chartMode.value = mode;
@@ -581,6 +600,17 @@ class SiteDetailsController extends GetxController {
 
     if (useFrontCache && cached != null && cached.isNotEmpty) {
       _setVisibleHistory(type, value, cached);
+
+      if (type == 'day') {
+        await _ensureMonthCacheForDay(
+          brandValue: currentBrand,
+          siteCodeValue: currentSiteCode,
+          selectedDay: chartCursor.value,
+          revision: revision,
+          requestVersion: requestVersion,
+        );
+      }
+
       return;
     }
 
@@ -617,6 +647,16 @@ class SiteDetailsController extends GetxController {
 
       _setVisibleHistory(type, value, history);
 
+      if (type == 'day') {
+        await _ensureMonthCacheForDay(
+          brandValue: currentBrand,
+          siteCodeValue: currentSiteCode,
+          selectedDay: chartCursor.value,
+          revision: revision,
+          requestVersion: requestVersion,
+        );
+      }
+
       lastRefresh.value = DateTime.now();
     } on ApiException catch (e) {
       if (exposeErrors) {
@@ -642,6 +682,55 @@ class SiteDetailsController extends GetxController {
       if (requestVersion == _historyRequestVersion) {
         isHistoryLoading.value = false;
       }
+    }
+  }
+
+  Future<void> _ensureMonthCacheForDay({
+    required String brandValue,
+    required String siteCodeValue,
+    required DateTime selectedDay,
+    required int revision,
+    required int requestVersion,
+  }) async {
+    final monthBucket = Formatters.apiMonth(selectedDay);
+    final monthCacheKey = _cacheKeyForSnapshot(
+      brandValue,
+      siteCodeValue,
+      'month',
+      monthBucket,
+    );
+
+    final existing = _frontHistoryCache[monthCacheKey];
+
+    if (existing != null && existing.isNotEmpty) {
+      return;
+    }
+
+    try {
+      final history = await _repository.getHistory(
+        brand: brandValue,
+        siteCode: siteCodeValue,
+        type: 'month',
+        value: monthBucket,
+      );
+
+      if (revision != _siteRevision ||
+          requestVersion != _historyRequestVersion ||
+          brandValue != brand ||
+          siteCodeValue != siteCode ||
+          chartMode.value != 'day' ||
+          !_sameBucket(chartCursor.value, selectedDay, 'day')) {
+        return;
+      }
+
+      if (history.isNotEmpty) {
+        _frontHistoryCache[monthCacheKey] = List<HistoryPoint>.from(history);
+        historyUiVersion.value = historyUiVersion.value + 1;
+      } else {
+        _frontHistoryCache.remove(monthCacheKey);
+      }
+    } catch (_) {
+      // On ne bloque pas la courbe Day si la source KPI mensuelle n'est pas disponible.
     }
   }
 
@@ -741,14 +830,91 @@ class SiteDetailsController extends GetxController {
   double get selectedPeriodEnergyKwh {
     if (!isHistorySynced) return 0;
 
+    /*
+     * DAY = courbe puissance kW.
+     * Donc on ne somme jamais les points de la courbe Day.
+     * Le KPI jour doit rester une énergie kWh.
+     */
+    if (chartMode.value == 'day') {
+      return selectedDayEnergyKwh ?? 0;
+    }
+
     return selectedHistory.fold<double>(
       0,
       (total, point) => total + _pointValue(point),
     );
   }
 
+  double? get selectedDayEnergyKwh {
+    final selected = DateTime(
+      chartCursor.value.year,
+      chartCursor.value.month,
+      chartCursor.value.day,
+    );
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+
+    /*
+     * Aujourd'hui: la source la plus directe est le détail du site.
+     */
+    if (selected == today) {
+      final value = detail.value?.dayEnergyKwh;
+
+      if (value == null || value < 0) {
+        return null;
+      }
+
+      return value;
+    }
+
+    /*
+     * Ancien jour: la bonne source est le point journalier dans l'historique du mois.
+     */
+    final monthBucket = Formatters.apiMonth(selected);
+    final monthCacheKey = _cacheKeyForSnapshot(
+      brand,
+      siteCode,
+      'month',
+      monthBucket,
+    );
+
+    final cachedMonth = _frontHistoryCache[monthCacheKey];
+
+    final monthPoints = cachedMonth != null && cachedMonth.isNotEmpty
+        ? cachedMonth
+        : activeHistoryMode.value == 'month' &&
+                activeHistoryBucket.value == monthBucket
+            ? monthHistory
+            : const <HistoryPoint>[];
+
+    for (final point in monthPoints) {
+      final date = point.dateTime;
+
+      if (date == null) continue;
+
+      if (date.year == selected.year &&
+          date.month == selected.month &&
+          date.day == selected.day) {
+        return _pointValue(point);
+      }
+    }
+
+    return null;
+  }
+
   String get selectedPeriodProductionLabel {
     if (!isHistorySynced) return '—';
+
+    if (chartMode.value == 'day') {
+      final value = selectedDayEnergyKwh;
+
+      if (value != null) {
+        return Formatters.energy(value);
+      }
+
+      return isHistoryLoading.value ? 'Chargement...' : '—';
+    }
 
     if (selectedHistory.isEmpty) {
       return isHistoryLoading.value ? 'Chargement...' : '—';
@@ -805,6 +971,10 @@ class SiteDetailsController extends GetxController {
   }
 
   bool get shouldShowSelectedPeriodKpi {
+    if (chartMode.value == 'day') {
+      return true;
+    }
+
     return !isCurrentChartPeriod;
   }
 

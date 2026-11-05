@@ -11,9 +11,9 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Centralise les appels FusionSolar par vrai compte / entreprise FusionSolar.
  *
- * Les 5 identifiants Northbound d'un même compte FusionSolar partagent le même group
- * et donc le même throttle. Deux groupes différents, par exemple itscom et
- * global-engineering, ne se bloquent plus entre eux.
+ * Le mode group est une protection configurable, pas une preuve de quotas Huawei partagés.
+ * Login par utilisateur ; cadences indépendantes par endpoint ; rapports protégés par groupe
+ * ou par utilisateur selon quota-scope. Une limitation réelle garde son cooldown conservateur.
  */
 @Slf4j
 @Component
@@ -39,8 +39,15 @@ public class HuaweiApiRateLimiter {
     @Value("${app.huawei-api.max-rate-limit-cooldown-ms:10800000}")
     private long maxRateLimitCooldownMs;
 
+    private final Map<String, Long> statePriorityUntil = new ConcurrentHashMap<>();
+
+    public void prioritizeStates(String accountKey) {
+        statePriorityUntil.compute(resolveGroup(accountKey), (key, until) ->
+                until == null ? System.currentTimeMillis() + 15000L : until);
+    }
+
     public void awaitSlot(String accountKey, String endpoint) {
-        String effectiveGroup = resolveGroup(accountKey);
+        String effectiveGroup = requestScope(accountKey, endpoint);
         String effectiveEndpoint = normalizeEndpoint(endpoint);
 
         while (true) {
@@ -50,16 +57,7 @@ public class HuaweiApiRateLimiter {
                 waitMs = computeWaitMsLocked(effectiveGroup, effectiveEndpoint, true);
 
                 if (waitMs <= 0L) {
-                    long reservedAt = System.currentTimeMillis();
-                    GroupState state = stateOf(effectiveGroup);
-
-                    state.lastRequestAt = reservedAt;
-                    state.endpointLastRequestAt.put(effectiveEndpoint, reservedAt);
-
-                    if (isHistoryEndpoint(effectiveEndpoint)) {
-                        state.lastHistoryRequestAt = reservedAt;
-                    }
-
+                    reserveSlotLocked(effectiveGroup, effectiveEndpoint, System.currentTimeMillis());
                     return;
                 }
             }
@@ -76,9 +74,28 @@ public class HuaweiApiRateLimiter {
         }
     }
 
+    /**
+     * Reserves a provider slot only when immediately available and never sleeps.
+     * Returns zero when reserved, otherwise the remaining delay in milliseconds.
+     */
+    public long tryReserveSlot(String accountKey, String endpoint) {
+        String effectiveGroup = requestScope(accountKey, endpoint);
+        String effectiveEndpoint = normalizeEndpoint(endpoint);
+
+        synchronized (lock) {
+            long waitMs = computeWaitMsLocked(effectiveGroup, effectiveEndpoint, true);
+            if (waitMs > 0L) {
+                return waitMs;
+            }
+
+            reserveSlotLocked(effectiveGroup, effectiveEndpoint, System.currentTimeMillis());
+            return 0L;
+        }
+    }
+
     public long waitMsBeforeNextSlot(String accountKey, String endpoint) {
         synchronized (lock) {
-            return computeWaitMsLocked(resolveGroup(accountKey), normalizeEndpoint(endpoint), false);
+            return computeWaitMsLocked(requestScope(accountKey, endpoint), normalizeEndpoint(endpoint), true);
         }
     }
 
@@ -90,7 +107,7 @@ public class HuaweiApiRateLimiter {
     }
 
     public void registerSuccess(String accountKey, String endpoint) {
-        String effectiveGroup = resolveGroup(accountKey);
+        String effectiveGroup = requestScope(accountKey, endpoint);
         String effectiveEndpoint = normalizeEndpoint(endpoint);
 
         synchronized (lock) {
@@ -111,7 +128,7 @@ public class HuaweiApiRateLimiter {
     }
 
     public void registerRateLimit(String accountKey, String endpoint, int attempt) {
-        String effectiveGroup = resolveGroup(accountKey);
+        String effectiveGroup = requestScope(accountKey, endpoint);
         String effectiveEndpoint = normalizeEndpoint(endpoint);
         long cooldownToApply;
 
@@ -150,6 +167,10 @@ public class HuaweiApiRateLimiter {
         GroupState state = stateOf(groupKey);
 
         long allowedAt = state.nextAllowedAt;
+        // A bounded priority for inventory only. Reports have their own quotas and must progress.
+        if ("/thirdData/stations".equals(endpoint) || "/thirdData/getDevList".equals(endpoint)) {
+            allowedAt = Math.max(allowedAt, statePriorityUntil.getOrDefault(groupKey, 0L));
+        }
 
         Long endpointAllowedAt = state.endpointNextAllowedAt.get(endpoint);
         if (endpointAllowedAt != null) {
@@ -157,7 +178,7 @@ public class HuaweiApiRateLimiter {
         }
 
         if (includeCadence) {
-            allowedAt = Math.max(allowedAt, state.lastRequestAt + groupDelayMs(endpoint));
+            // No cross-endpoint cadence: login/live/report must not consume each other's slots.
 
             Long endpointLastAt = state.endpointLastRequestAt.get(endpoint);
             if (endpointLastAt != null) {
@@ -172,11 +193,34 @@ public class HuaweiApiRateLimiter {
         return Math.max(0L, allowedAt - now);
     }
 
+    private void reserveSlotLocked(String groupKey, String endpoint, long reservedAt) {
+        GroupState state = stateOf(groupKey);
+        state.lastRequestAt = reservedAt;
+        if ("/thirdData/getStationRealKpi".equals(endpoint)) statePriorityUntil.remove(groupKey);
+        state.endpointLastRequestAt.put(endpoint, reservedAt);
+
+        if (isHistoryEndpoint(endpoint)) {
+            state.lastHistoryRequestAt = reservedAt;
+        }
+    }
+
     private GroupState stateOf(String groupKey) {
         return statesByGroup.computeIfAbsent(groupKey, key -> new GroupState());
     }
 
+    @Value("${app.huawei-api.quota-scope:group}")
+    private String quotaScope;
+
+    public String budgetScope(String accountKey) { return resolveGroup(accountKey); }
+
+    private String requestScope(String accountKey, String endpoint) {
+        // Login limits belong to the real API user even in shared report-budget mode.
+        return "/thirdData/login".equals(normalizeEndpoint(endpoint))
+                ? "login:" + normalizeKey(accountKey) : resolveGroup(accountKey);
+    }
+
     private String resolveGroup(String accountKey) {
+        if ("account".equalsIgnoreCase(quotaScope)) return normalizeKey(accountKey);
         String effectiveKey = normalizeKey(accountKey);
 
         for (HuaweiAccountDirectory.HuaweiAccount account : huaweiAccountDirectory.getEnabledAccounts()) {

@@ -24,18 +24,14 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
@@ -49,6 +45,12 @@ import java.util.stream.Collectors;
  * - les historiques manquants sont remplis en arrière-plan;
  * - chaque groupe FusionSolar a son propre throttle, partagé par ses API Northbound;
  * - les buckets courants sont rafraîchis périodiquement pour que chaque nouveau jour arrive automatiquement.
+ *
+ * Règle importante:
+ * - DAY = courbe horaire en kW;
+ * - MONTH = production journalière kWh;
+ * - les KPI jour, alertes, comparaison et indice performance utilisent MONTH;
+ * - pour le mois courant, on sauvegarde seulement les jours terminés jusqu'à hier.
  */
 @Slf4j
 @Service
@@ -56,22 +58,16 @@ import java.util.stream.Collectors;
 public class HuaweiBatchHistoryBackfillService {
 
     private static final ZoneId TUNIS_ZONE = ZoneId.of("Africa/Tunis");
-    private static final DateTimeFormatter DISPLAY_DATE_FORMATTER = DateTimeFormatter.ofPattern("dd/MM/yyyy");
 
     private final SiteRepository siteRepository;
     private final SiteHistoryRepository siteHistoryRepository;
     private final SiteMongoMapper siteMongoMapper;
     private final FusionSolarStationClient stationClient;
     private final HuaweiAccountDirectory huaweiAccountDirectory;
+    private final PersistentRateBudgetService persistentRateBudgetService;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicInteger accountCursor = new AtomicInteger(0);
-
-    /**
-     * Compteur en mémoire pour éviter de dépasser les quotas journaliers Huawei Report.
-     * La clé contient la date, le groupe et l’endpoint.
-     */
-    private final Map<String, DailyCounter> huaweiDailyCounters = new ConcurrentHashMap<>();
 
     @Value("${app.history-batch-backfill.enabled:true}")
     private boolean enabled;
@@ -109,8 +105,17 @@ public class HuaweiBatchHistoryBackfillService {
     @Value("${app.history-batch-backfill.current-day-refresh-ms:900000}")
     private long currentDayRefreshMs;
 
-    @Value("${app.history-batch-backfill.current-month-refresh-ms:3600000}")
+    @Value("${app.history-batch-backfill.current-month-refresh-ms:21600000}")
     private long currentMonthRefreshMs;
+
+    @Value("${app.history-batch-backfill.incomplete-month-refresh-ms:${app.history-backfill.incomplete-month-refresh-ms:21600000}}")
+    private long incompleteMonthRefreshMs;
+
+    @Value("${app.history-batch-backfill.invalid-value-month-refresh-ms:${app.history-backfill.invalid-value-month-refresh-ms:21600000}}")
+    private long invalidValueMonthRefreshMs;
+
+    @Value("${app.history-batch-backfill.month-finalization-grace-hours:${app.history-backfill.month-finalization-grace-hours:6}}")
+    private int monthFinalizationGraceHours;
 
     @Value("${app.history-batch-backfill.current-year-refresh-ms:21600000}")
     private long currentYearRefreshMs;
@@ -144,7 +149,9 @@ public class HuaweiBatchHistoryBackfillService {
     }
 
     private int runOnePass() {
-        Map<String, List<HuaweiAccount>> accountsByGroup = huaweiAccountDirectory.getEnabledAccountsByGroup();
+        Map<String, List<HuaweiAccount>> accountsByGroup =
+                huaweiAccountDirectory.getEnabledAccountsByGroup();
+
         if (accountsByGroup.isEmpty()) {
             log.warn("Huawei batch backfill skipped: no enabled Huawei API account configured");
             return 0;
@@ -178,11 +185,18 @@ public class HuaweiBatchHistoryBackfillService {
 
             List<HuaweiAccount> groupAccounts = accountsByGroup.get(accountGroup);
             if (groupAccounts == null || groupAccounts.isEmpty()) {
-                log.warn("Huawei batch history skipped for group={}: no enabled Northbound credential", accountGroup);
+                log.warn(
+                        "Huawei batch history skipped for group={}: no enabled Northbound credential",
+                        accountGroup
+                );
                 continue;
             }
 
-            Optional<HuaweiAccount> account = nextAvailableAccount(groupAccounts);
+            HistoryCandidate selectedCandidate = next.get().candidate();
+            List<HuaweiAccount> eligibleAccounts = groupAccounts.stream().filter(a ->
+                    persistentRateBudgetService.usedToday("HUAWEI", quotaScopeFor(a.key(), accountGroup),
+                            huaweiEndpoint(selectedCandidate), TUNIS_ZONE) < Math.max(1, huaweiReportDailyCallLimit)).toList();
+            Optional<HuaweiAccount> account = nextAvailableAccount(eligibleAccounts, huaweiEndpoint(selectedCandidate));
             if (account.isEmpty()) {
                 log.info(
                         "Huawei batch history skipped this pass for group={}: all group accounts are cooling down after rate limit.",
@@ -191,14 +205,23 @@ public class HuaweiBatchHistoryBackfillService {
                 continue;
             }
 
-            executeTask(next.get(), account.get().key());
-            callsDone++;
+            try {
+                executeTask(next.get(), account.get().key());
+                callsDone++;
+            } catch (com.fusionsolar.monitoring.service.huawei.HuaweiApiDeferredException deferred) {
+                log.info("Huawei history deferred group={} endpoint={} retryAfterMs={}",
+                        accountGroup, huaweiEndpoint(selectedCandidate), deferred.getRetryAfterMs());
+                // Continue with the other enterprise instead of aborting the whole pass.
+            }
         }
 
         return callsDone;
     }
 
-    private Optional<BatchTask> nextTask(List<SiteDocument> sites, Set<String> excludedGroups) {
+    private Optional<BatchTask> nextTask(
+            List<SiteDocument> sites,
+            Set<String> excludedGroups
+    ) {
         Map<String, List<SiteDocument>> sitesByGroup = sites.stream()
                 .collect(Collectors.groupingBy(
                         this::accountGroupOf,
@@ -209,6 +232,7 @@ public class HuaweiBatchHistoryBackfillService {
         for (HistoryCandidate candidate : candidates()) {
             for (Map.Entry<String, List<SiteDocument>> entry : sitesByGroup.entrySet()) {
                 String accountGroup = entry.getKey();
+
                 if (excludedGroups.contains(accountGroup)) {
                     continue;
                 }
@@ -218,6 +242,12 @@ public class HuaweiBatchHistoryBackfillService {
                 if (!hasHuaweiDailyQuota(accountGroup, candidate, dailyLimit)) {
                     continue;
                 }
+
+                List<HuaweiAccount> candidateAccounts = huaweiAccountDirectory.getEnabledAccountsByGroup()
+                        .getOrDefault(accountGroup, List.of()).stream().filter(a ->
+                                persistentRateBudgetService.usedToday("HUAWEI", quotaScopeFor(a.key(), accountGroup),
+                                        huaweiEndpoint(candidate), TUNIS_ZONE) < dailyLimit).toList();
+                if (nextAvailableAccount(candidateAccounts, huaweiEndpoint(candidate)).isEmpty()) continue;
 
                 List<SiteDocument> dueSites = dueSites(accountGroup, entry.getValue(), candidate)
                         .stream()
@@ -243,17 +273,41 @@ public class HuaweiBatchHistoryBackfillService {
         List<HistoryCandidate> candidates = new ArrayList<>();
 
         /*
-         * 1) Buckets courants.
-         * Objectif: garder l’UI à jour sans bloquer le backfill historique.
+         * 1) Buckets courants importants.
+         * DAY courant = courbe puissance du jour.
+         * MONTH courant = source kWh pour KPI jour / alertes / comparaison.
          */
-        candidates.add(new HistoryCandidate(HistoryGranularity.DAY, "day", today.toString(), true));
-        candidates.add(new HistoryCandidate(HistoryGranularity.MONTH, "month", currentMonth.toString(), true));
-        candidates.add(new HistoryCandidate(HistoryGranularity.YEAR, "year", String.valueOf(currentYear), true));
-        candidates.add(new HistoryCandidate(HistoryGranularity.YEARLY, "yearly", "all", true));
+        candidates.add(new HistoryCandidate(
+                HistoryGranularity.DAY,
+                "day",
+                today.toString(),
+                true
+        ));
+        candidates.add(new HistoryCandidate(
+                HistoryGranularity.MONTH,
+                "month",
+                currentMonth.toString(),
+                true
+        ));
 
         /*
-         * 2) YEAR historique.
-         * Très rentable: un appel donne les 12 mois de l’année pour jusqu’à 100 sites.
+         * 2) MONTH historique en priorité.
+         * C'est le plus important pour combler les KPI journaliers.
+         */
+        YearMonth monthCursor = currentMonth.minusMonths(1);
+        while (!monthCursor.isBefore(firstMonth)) {
+            candidates.add(new HistoryCandidate(
+                    HistoryGranularity.MONTH,
+                    "month",
+                    monthCursor.toString(),
+                    false
+            ));
+            monthCursor = monthCursor.minusMonths(1);
+        }
+
+        /*
+         * 3) YEAR / YEARLY après MONTH.
+         * Utile pour les courbes année, mais moins critique que MONTH.
          */
         for (int year = currentYear; year >= firstMonth.getYear(); year--) {
             String bucket = String.valueOf(year);
@@ -261,30 +315,20 @@ public class HuaweiBatchHistoryBackfillService {
                     HistoryGranularity.YEAR,
                     "year",
                     bucket,
-                    bucket.equals(String.valueOf(currentYear))
+                    year == currentYear
             ));
         }
 
-        /*
-         * 3) MONTH historique.
-         * Très rentable: un appel donne les jours du mois pour jusqu’à 100 sites.
-         */
-        YearMonth cursor = currentMonth;
-        while (!cursor.isBefore(firstMonth)) {
-            String bucket = cursor.toString();
-            candidates.add(new HistoryCandidate(
-                    HistoryGranularity.MONTH,
-                    "month",
-                    bucket,
-                    bucket.equals(currentMonth.toString())
-            ));
-            cursor = cursor.minusMonths(1);
-        }
+        candidates.add(new HistoryCandidate(
+                HistoryGranularity.YEARLY,
+                "yearly",
+                "all",
+                true
+        ));
 
         /*
          * 4) DAY historique.
          * Très coûteux: un bucket = une seule date.
-         * Donc il passe après YEAR/MONTH et il est limité par historic-day-lookback-days.
          */
         if (historicDayBackfillEnabled) {
             LocalDate firstDay;
@@ -294,6 +338,7 @@ public class HuaweiBatchHistoryBackfillService {
             } else {
                 firstDay = yesterday.minusDays(Math.max(0, historicDayLookbackDays - 1L));
                 LocalDate hardLimit = firstMonth.atDay(1);
+
                 if (firstDay.isBefore(hardLimit)) {
                     firstDay = hardLimit;
                 }
@@ -314,7 +359,11 @@ public class HuaweiBatchHistoryBackfillService {
         return candidates;
     }
 
-    private List<SiteDocument> dueSites(String accountGroup, List<SiteDocument> sites, HistoryCandidate candidate) {
+    private List<SiteDocument> dueSites(
+            String accountGroup,
+            List<SiteDocument> sites,
+            HistoryCandidate candidate
+    ) {
         Map<String, SiteHistoryDocument> existingBySiteCode = siteHistoryRepository
                 .findAllByBrandAndProviderAccountGroupAndGranularityAndBucket(
                         Brand.HUAWEI,
@@ -330,41 +379,70 @@ public class HuaweiBatchHistoryBackfillService {
                         (left, right) -> left
                 ));
 
-        LocalDate yesterday = LocalDate.now(TUNIS_ZONE).minusDays(1);
+        LocalDate today = LocalDate.now(TUNIS_ZONE);
 
         return sites.stream()
-                .filter(site -> isBucketAfterSiteStart(site, candidate, yesterday))
-                .filter(site -> isDocumentDue(existingBySiteCode.get(site.getSiteCode()), candidate))
+                .filter(site -> isBucketAfterSiteStart(site, candidate, today))
+                .filter(site -> isDocumentDue(site, existingBySiteCode.get(site.getSiteCode()), candidate))
                 .toList();
     }
 
-    private boolean isBucketAfterSiteStart(SiteDocument site, HistoryCandidate candidate, LocalDate yesterday) {
+    private boolean isBucketAfterSiteStart(
+            SiteDocument site,
+            HistoryCandidate candidate,
+            LocalDate today
+    ) {
         if (candidate.granularity() == HistoryGranularity.YEARLY) {
             return true;
         }
 
-        LocalDate firstDate = firstHistoryDate(site, yesterday);
+        if (candidate.granularity() == HistoryGranularity.MONTH) {
+            return HistoryBackfillCompletenessSupport.isMonthBucketAfterSiteStart(
+                    site,
+                    candidate.bucket(),
+                    today,
+                    maxLookbackMonths,
+                    TUNIS_ZONE
+            );
+        }
+
+        LocalDate firstDate = HistoryBackfillCompletenessSupport.firstHistoryDate(
+                site,
+                today,
+                maxLookbackMonths,
+                TUNIS_ZONE
+        );
+
         LocalDate bucketEnd = bucketEndDate(candidate);
 
         return bucketEnd == null || !bucketEnd.isBefore(firstDate);
     }
 
-    private boolean isDocumentDue(SiteHistoryDocument document, HistoryCandidate candidate) {
+    private boolean isDocumentDue(
+            SiteDocument site,
+            SiteHistoryDocument document,
+            HistoryCandidate candidate
+    ) {
+        if (candidate.granularity() == HistoryGranularity.MONTH) {
+            return isMonthBucketDueWithLog(site, document, candidate.bucket());
+        }
+
         if (document == null) {
             return true;
         }
 
         boolean hasPoints = document.getPoints() != null && !document.getPoints().isEmpty();
+
         if (hasPoints) {
             if (!candidate.current()) {
                 return false;
             }
 
-            long refreshMs = refreshIntervalMs(candidate.granularity());
             if (document.getLastSyncAt() == null) {
                 return true;
             }
 
+            long refreshMs = refreshIntervalMs(candidate.granularity());
             return document.getLastSyncAt().isBefore(Instant.now().minusMillis(refreshMs));
         }
 
@@ -372,8 +450,111 @@ public class HuaweiBatchHistoryBackfillService {
             return true;
         }
 
-        Instant retryAfter = document.getLastSyncAt().plusMillis(Math.max(60_000L, emptyHistoryRetryMs));
+        Instant retryAfter = document.getLastSyncAt()
+                .plusMillis(Math.max(60_000L, emptyHistoryRetryMs));
+
         return !Instant.now().isBefore(retryAfter);
+    }
+
+    private boolean isMonthBucketDueWithLog(
+            SiteDocument site,
+            SiteHistoryDocument document,
+            String bucket
+    ) {
+        LocalDate today = LocalDate.now(TUNIS_ZONE);
+
+        HistoryBackfillCompletenessSupport.MonthCompleteness completeness =
+                HistoryBackfillCompletenessSupport.inspectMonth(
+                        site,
+                        document,
+                        bucket,
+                        today,
+                        maxLookbackMonths,
+                        TUNIS_ZONE
+                );
+
+        boolean due = HistoryBackfillCompletenessSupport.isMonthHistoryDue(
+                site,
+                document,
+                bucket,
+                today,
+                maxLookbackMonths,
+                emptyHistoryRetryMs,
+                incompleteMonthRefreshMs,
+                invalidValueMonthRefreshMs,
+                currentMonthRefreshMs,
+                monthFinalizationGraceHours,
+                TUNIS_ZONE
+        );
+
+        if (due) {
+            log.info(
+                    "Huawei MONTH bucket due site={} group={} bucket={} status={} collected={}/{} present={} missingDays={} zeroOrNullDays={} missingOrInvalid={} expectedRange={}..{} lastSyncAt={} reason={}",
+                    site.getSiteCode(),
+                    accountGroupOf(site),
+                    bucket,
+                    HistoryBackfillCompletenessSupport.monthStatusLabel(completeness),
+                    completeness.collectedDays(),
+                    completeness.expectedDays(),
+                    completeness.presentDays(),
+                    completeness.missingDays(),
+                    completeness.invalidValueDays(),
+                    completeness.missingOrInvalidDays(),
+                    completeness.expectedStart(),
+                    completeness.expectedEnd(),
+                    document != null ? document.getLastSyncAt() : null,
+                    monthDueReason(document, completeness, bucket)
+            );
+        } else if (completeness.expectedDays() > 0) {
+            log.debug(
+                    "Huawei MONTH bucket OK site={} group={} bucket={} collected={}/{} present={} missingDays={} zeroOrNullDays={} expectedRange={}..{} lastSyncAt={}",
+                    site.getSiteCode(),
+                    accountGroupOf(site),
+                    bucket,
+                    completeness.collectedDays(),
+                    completeness.expectedDays(),
+                    completeness.presentDays(),
+                    completeness.missingDays(),
+                    completeness.invalidValueDays(),
+                    completeness.expectedStart(),
+                    completeness.expectedEnd(),
+                    document != null ? document.getLastSyncAt() : null
+            );
+        }
+
+        return due;
+    }
+
+    private String monthDueReason(
+            SiteHistoryDocument document,
+            HistoryBackfillCompletenessSupport.MonthCompleteness completeness,
+            String bucket
+    ) {
+        if (document == null) {
+            return "MISSING_BUCKET";
+        }
+
+        if (document.getPoints() == null || document.getPoints().isEmpty()) {
+            return "EMPTY_BUCKET";
+        }
+
+        if (completeness.missingDays() > 0 && completeness.invalidValueDays() > 0) {
+            return "MISSING_DAYS_AND_ZERO_OR_NULL_VALUES";
+        }
+
+        if (completeness.missingDays() > 0) {
+            return "MISSING_DAYS";
+        }
+
+        if (completeness.invalidValueDays() > 0) {
+            return "ZERO_OR_NULL_VALUE_DAYS";
+        }
+
+        if (YearMonth.now(TUNIS_ZONE).toString().equals(bucket)) {
+            return "CURRENT_MONTH_REFRESH";
+        }
+
+        return "COLLECTED_TOO_EARLY_OR_STALE";
     }
 
     private long refreshIntervalMs(HistoryGranularity granularity) {
@@ -414,7 +595,6 @@ public class HuaweiBatchHistoryBackfillService {
         StationHistoryResponse response;
 
         HistoryCandidate candidate = task.candidate();
-        registerHuaweiDailyCall(task.accountGroup(), candidate);
 
         if (candidate.granularity() == HistoryGranularity.DAY) {
             response = stationClient.getStationHourlyHistory(
@@ -454,24 +634,35 @@ public class HuaweiBatchHistoryBackfillService {
 
         Map<String, List<HistoryPointDto>> pointsBySiteCode = mapHistoryBySiteCode(response);
         Set<String> returnedSiteCodes = pointsBySiteCode.keySet();
+        long returnedPoints = pointsBySiteCode.values().stream().mapToLong(List::size).sum();
 
         for (SiteDocument site : task.sites()) {
-            List<HistoryPointDto> points = pointsBySiteCode.get(site.getSiteCode());
-            saveHistory(site, candidate.granularity(), candidate.bucket(), points != null ? points : List.of());
+            List<HistoryPointDto> loadedPoints =
+                    pointsBySiteCode.getOrDefault(site.getSiteCode(), List.of());
+
+            saveHistory(
+                    site,
+                    candidate.granularity(),
+                    candidate.bucket(),
+                    loadedPoints
+            );
         }
 
         log.info(
-                "Huawei batch history loaded group={} account={} type={} bucket={} requestedSites={} returnedSites={}",
+                "Huawei batch history loaded group={} account={} type={} bucket={} requestedSites={} returnedSites={} returnedPoints={}",
                 task.accountGroup(),
                 accountKey,
                 candidate.type(),
                 candidate.bucket(),
                 task.sites().size(),
-                returnedSiteCodes.size()
+                returnedSiteCodes.size(),
+                returnedPoints
         );
     }
 
-    private Map<String, List<HistoryPointDto>> mapHistoryBySiteCode(StationHistoryResponse response) {
+    private Map<String, List<HistoryPointDto>> mapHistoryBySiteCode(
+            StationHistoryResponse response
+    ) {
         Map<String, List<HistoryPointDto>> result = new LinkedHashMap<>();
 
         if (response == null || response.getData() == null) {
@@ -479,13 +670,18 @@ public class HuaweiBatchHistoryBackfillService {
         }
 
         for (StationHistoryItemDto item : response.getData()) {
-            if (item == null || item.getStationCode() == null || item.getStationCode().isBlank() || item.getCollectTime() == null) {
+            if (item == null
+                    || item.getStationCode() == null
+                    || item.getStationCode().isBlank()
+                    || item.getCollectTime() == null) {
                 continue;
             }
 
-            Double value = extractDouble(item.getDataItemMap() != null
-                    ? item.getDataItemMap().get("inverter_power")
-                    : null);
+            Double value = extractDouble(
+                    item.getDataItemMap() != null
+                            ? item.getDataItemMap().get("inverter_power")
+                            : null
+            );
 
             result.computeIfAbsent(item.getStationCode(), key -> new ArrayList<>())
                     .add(new HistoryPointDto(item.getCollectTime(), value));
@@ -509,6 +705,7 @@ public class HuaweiBatchHistoryBackfillService {
     ) {
         Instant now = Instant.now();
         String accountGroup = accountGroupOf(site);
+
         SiteHistoryDocument existing = siteHistoryRepository
                 .findByBrandAndProviderAccountGroupAndSiteCodeAndGranularityAndBucket(
                         Brand.HUAWEI,
@@ -519,11 +716,16 @@ public class HuaweiBatchHistoryBackfillService {
                 )
                 .orElse(null);
 
-        List<HistoryPointDto> pointsToSave = loadedPoints != null ? loadedPoints : List.of();
+        List<HistoryPointDto> mergedPoints =
+                HistoryBackfillCompletenessSupport.mergeHistoryPoints(
+                        existing != null ? existing.getPoints() : List.of(),
+                        loadedPoints,
+                        granularity,
+                        TUNIS_ZONE
+                );
 
-        if (pointsToSave.isEmpty() && existing != null && existing.getPoints() != null && !existing.getPoints().isEmpty()) {
-            pointsToSave = existing.getPoints();
-        }
+        List<HistoryPointDto> pointsToSave =
+                clampMonthPoints(site, granularity, bucket, mergedPoints);
 
         SiteHistoryDocument document = siteMongoMapper.toSiteHistoryDocument(
                 Brand.HUAWEI,
@@ -538,84 +740,83 @@ public class HuaweiBatchHistoryBackfillService {
         document.setProviderAccountKey(accountKeyOf(site));
         document.setProviderAccountGroup(accountGroup);
 
+        if (loadedPoints != null && !loadedPoints.isEmpty()) {
+            HistoryCollectionStateSupport.markSuccessful(document, now);
+        }
+
         siteHistoryRepository.save(document);
+
+        logMonthSaveStatus(
+                site,
+                granularity,
+                bucket,
+                loadedPoints,
+                pointsToSave,
+                document
+        );
     }
 
-    private LocalDate firstHistoryDate(SiteDocument site, LocalDate yesterday) {
-        LocalDate maxLookbackStart = YearMonth.from(yesterday)
-                .minusMonths(Math.max(1, maxLookbackMonths) - 1L)
-                .atDay(1);
+    private List<HistoryPointDto> clampMonthPoints(
+            SiteDocument site,
+            HistoryGranularity granularity,
+            String bucket,
+            List<HistoryPointDto> points
+    ) {
+        List<HistoryPointDto> safe = points != null ? points : List.of();
 
-        /*
-         * On se base sur la dernière modification fonctionnelle:
-         * la vraie date de début production est la date de swap quand elle existe.
-         * Sinon on utilise la date de mise en service / grid connection.
-         */
-        LocalDate productionStartDate = site.getSwapDate() != null
-                ? site.getSwapDate()
-                : parseDate(site.getGridConnectionDate());
-
-        if (productionStartDate == null) {
-            /*
-             * Pour les sites existants, gridConnectionDate peut être absent dans l'API.
-             * On préfère backfiller jusqu'à maxLookbackStart plutôt que de perdre tout l'ancien historique.
-             * Les vrais nouveaux sites sans historique auront des buckets vides, mémorisés et retentés plus tard.
-             */
-            return maxLookbackStart;
+        if (granularity != HistoryGranularity.MONTH) {
+            return safe;
         }
 
-        if (productionStartDate.isBefore(maxLookbackStart)) {
-            return maxLookbackStart;
-        }
-
-        return productionStartDate;
+        return HistoryBackfillCompletenessSupport.clampMonthPointsToExpectedWindow(
+                site,
+                bucket,
+                safe,
+                LocalDate.now(TUNIS_ZONE),
+                maxLookbackMonths,
+                TUNIS_ZONE
+        );
     }
 
-    private LocalDate parseDate(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
+    private void logMonthSaveStatus(
+            SiteDocument site,
+            HistoryGranularity granularity,
+            String bucket,
+            List<HistoryPointDto> loadedPoints,
+            List<HistoryPointDto> savedPoints,
+            SiteHistoryDocument document
+    ) {
+        if (granularity != HistoryGranularity.MONTH) {
+            return;
         }
 
-        String value = raw.trim();
+        HistoryBackfillCompletenessSupport.MonthCompleteness completeness =
+                HistoryBackfillCompletenessSupport.inspectMonth(
+                        site,
+                        document,
+                        bucket,
+                        LocalDate.now(TUNIS_ZONE),
+                        maxLookbackMonths,
+                        TUNIS_ZONE
+                );
 
-        if (value.matches("^\\d{10,13}$")) {
-            long epoch = Long.parseLong(value);
-            long epochMillis = epoch < 1_000_000_000_000L ? epoch * 1000 : epoch;
-            return Instant.ofEpochMilli(epochMillis).atZone(TUNIS_ZONE).toLocalDate();
-        }
-
-        try {
-            return LocalDate.parse(value);
-        } catch (DateTimeParseException ignored) {
-            // Try display format below.
-        }
-
-        try {
-            return LocalDate.parse(value, DISPLAY_DATE_FORMATTER);
-        } catch (DateTimeParseException ignored) {
-            // Try text cleanup below.
-        }
-
-        String firstTenChars = value.length() >= 10 ? value.substring(0, 10) : value;
-
-        try {
-            return LocalDate.parse(firstTenChars);
-        } catch (DateTimeParseException ignored) {
-            // Try slash format below.
-        }
-
-        try {
-            return LocalDate.parse(firstTenChars, DateTimeFormatter.ofPattern("yyyy/MM/dd"));
-        } catch (DateTimeParseException ignored) {
-            // Try year-month below.
-        }
-
-        String normalized = value.toUpperCase(Locale.ROOT).replace('/', '-');
-        if (normalized.matches("^\\d{4}-\\d{2}$")) {
-            return YearMonth.parse(normalized).atDay(1);
-        }
-
-        return null;
+        log.info(
+                "Huawei MONTH bucket saved site={} group={} bucket={} loadedPoints={} savedPoints={} status={} collected={}/{} present={} missingDays={} zeroOrNullDays={} missingOrInvalid={} expectedRange={}..{}",
+                site.getSiteCode(),
+                accountGroupOf(site),
+                bucket,
+                loadedPoints == null ? 0 : loadedPoints.size(),
+                savedPoints == null ? 0 : savedPoints.size(),
+                HistoryBackfillCompletenessSupport.monthStatusLabel(completeness),
+                completeness.collectedDays(),
+                completeness.expectedDays(),
+                completeness.presentDays(),
+                completeness.missingDays(),
+                completeness.invalidValueDays(),
+                completeness.missingOrInvalidDays(),
+                completeness.expectedStart(),
+                completeness.expectedEnd()
+        );
     }
 
     private Double extractDouble(Object value) {
@@ -637,26 +838,34 @@ public class HuaweiBatchHistoryBackfillService {
             }
 
             return Double.parseDouble(text.replace("%", "").replace(",", "."));
-
         } catch (Exception e) {
             return null;
         }
     }
 
     private String accountKeyOf(SiteDocument site) {
-        if (site != null && site.getProviderAccountKey() != null && !site.getProviderAccountKey().isBlank()) {
+        if (site != null
+                && site.getProviderAccountKey() != null
+                && !site.getProviderAccountKey().isBlank()) {
             return site.getProviderAccountKey().trim();
         }
+
         return huaweiAccountDirectory.primaryAccountKey();
     }
 
     private String accountGroupOf(SiteDocument site) {
-        if (site != null && site.getProviderAccountGroup() != null && !site.getProviderAccountGroup().isBlank()) {
+        if (site != null
+                && site.getProviderAccountGroup() != null
+                && !site.getProviderAccountGroup().isBlank()) {
             return site.getProviderAccountGroup().trim();
         }
-        if (site != null && site.getProviderAccountKey() != null && !site.getProviderAccountKey().isBlank()) {
+
+        if (site != null
+                && site.getProviderAccountKey() != null
+                && !site.getProviderAccountKey().isBlank()) {
             return site.getProviderAccountKey().trim();
         }
+
         return huaweiAccountDirectory.primaryAccountGroup();
     }
 
@@ -677,23 +886,23 @@ public class HuaweiBatchHistoryBackfillService {
             HistoryCandidate candidate,
             int limit
     ) {
-        String key = dailyQuotaKey(accountGroup, candidate);
-        DailyCounter counter = huaweiDailyCounters.computeIfAbsent(key, ignored -> new DailyCounter());
-        return counter.count < Math.max(1, limit);
+        return huaweiAccountDirectory.getEnabledAccountsByGroup().getOrDefault(accountGroup, List.of()).stream()
+                .anyMatch(account -> persistentRateBudgetService.usedToday("HUAWEI",
+                        quotaScopeFor(account.key(), accountGroup), huaweiEndpoint(candidate), TUNIS_ZONE) < Math.max(1, limit));
     }
 
-    private void registerHuaweiDailyCall(String accountGroup, HistoryCandidate candidate) {
-        String key = dailyQuotaKey(accountGroup, candidate);
-        DailyCounter counter = huaweiDailyCounters.computeIfAbsent(key, ignored -> new DailyCounter());
-        counter.count++;
-    }
-
-    private String dailyQuotaKey(String accountGroup, HistoryCandidate candidate) {
-        return LocalDate.now(TUNIS_ZONE)
-                + "|"
-                + safeGroup(accountGroup)
-                + "|"
-                + huaweiEndpoint(candidate);
+    private boolean reserveHuaweiDailyCall(
+            String accountGroup,
+            HistoryCandidate candidate,
+            int limit
+    ) {
+        return persistentRateBudgetService.tryConsumeDaily(
+                "HUAWEI",
+                safeGroup(accountGroup),
+                huaweiEndpoint(candidate),
+                limit,
+                TUNIS_ZONE
+        );
     }
 
     private String huaweiEndpoint(HistoryCandidate candidate) {
@@ -705,46 +914,26 @@ public class HuaweiBatchHistoryBackfillService {
         };
     }
 
+    @Value("${app.huawei-api.quota-scope:group}")
+    private String quotaScope;
+    private String quotaScopeFor(String account, String group) {
+        return "account".equalsIgnoreCase(quotaScope) ? account : safeGroup(group);
+    }
     private String safeGroup(String value) {
         return value == null || value.isBlank() ? "default" : value.trim();
     }
 
-    private Optional<HuaweiAccount> nextAvailableAccount(List<HuaweiAccount> accounts) {
-        if (accounts == null || accounts.isEmpty()) {
-            return Optional.empty();
+    private Optional<HuaweiAccount> nextAvailableAccount(List<HuaweiAccount> accounts, String endpoint) {
+        if (accounts == null || accounts.isEmpty()) return Optional.empty();
+        // Prefer a cached session, avoid pointless logins on api-02..05 in shared mode.
+        List<HuaweiAccount> ready = accounts.stream()
+                .filter(a -> stationClient.huaweiWaitMsBeforeCall(a.key(), endpoint) <= 0L).toList();
+        if (ready.isEmpty()) return Optional.empty();
+        if (!"account".equalsIgnoreCase(quotaScope)) {
+            return ready.stream().filter(a -> stationClient.hasUsableHuaweiSession(a.key())).findFirst()
+                    .or(() -> Optional.of(ready.get(0)));
         }
-
-        int startIndex = Math.floorMod(accountCursor.getAndIncrement(), accounts.size());
-        HuaweiAccount bestCoolingAccount = null;
-        long bestWaitMs = Long.MAX_VALUE;
-
-        for (int offset = 0; offset < accounts.size(); offset++) {
-            HuaweiAccount account = accounts.get((startIndex + offset) % accounts.size());
-            long waitMs = stationClient.huaweiWaitMsBeforeNextHistoryCall(account.key());
-
-            if (waitMs <= 0L || !stationClient.isHuaweiAccountCoolingDown(account.key())) {
-                return Optional.of(account);
-            }
-
-            if (waitMs < bestWaitMs) {
-                bestWaitMs = waitMs;
-                bestCoolingAccount = account;
-            }
-        }
-
-        if (bestCoolingAccount != null) {
-            log.info(
-                    "Huawei batch history account selection: nearest available account={} in about {} ms",
-                    bestCoolingAccount.key(),
-                    bestWaitMs
-            );
-        }
-
-        return Optional.empty();
-    }
-
-    private static class DailyCounter {
-        private int count = 0;
+        return Optional.of(ready.get(Math.floorMod(accountCursor.getAndIncrement(), ready.size())));
     }
 
     private record HistoryCandidate(

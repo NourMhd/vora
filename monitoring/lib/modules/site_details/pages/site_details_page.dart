@@ -1,7 +1,9 @@
 import 'dart:typed_data';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:syncfusion_flutter_gauges/gauges.dart' as sfg;
 
 import '../../../app/routes/app_routes.dart';
 import '../../../app/theme/app_colors.dart';
@@ -31,7 +33,8 @@ class SiteDetailsPage extends GetView<SiteDetailsController> {
           return const LoadingState(label: 'Chargement du site...');
         }
 
-        if (controller.errorMessage.value != null && controller.detail.value == null) {
+        if (controller.errorMessage.value != null &&
+            controller.detail.value == null) {
           return ErrorState(
             message: controller.errorMessage.value!,
             onRetry: controller.load,
@@ -141,8 +144,10 @@ class _SitesNavigator extends StatelessWidget {
                 itemBuilder: (context, index) => _NavSiteTile(
                   controller: controller,
                   site: sites[index],
-                  active: sites[index].siteCode == controller.siteCode &&
-                      sites[index].brand.toUpperCase() == controller.brand.toUpperCase(),
+                  active:
+                      sites[index].siteCode == controller.siteCode &&
+                      sites[index].brand.toUpperCase() ==
+                          controller.brand.toUpperCase(),
                 ),
               );
             }),
@@ -170,10 +175,7 @@ class _NavSiteTile extends StatelessWidget {
       onTap: active
           ? null
           : () {
-              controller.openSite(
-                brand: site.brand,
-                siteCode: site.siteCode,
-              );
+              controller.openSite(brand: site.brand, siteCode: site.siteCode);
 
               Get.offNamed(
                 AppRoutes.siteDetailsPath(
@@ -190,7 +192,9 @@ class _NavSiteTile extends StatelessWidget {
           color: active ? AppColors.tealSoft : AppColors.softWhite,
           borderRadius: BorderRadius.circular(18),
           border: Border.all(
-            color: active ? AppColors.deepTeal.withOpacity(0.26) : AppColors.borderGray,
+            color: active
+                ? AppColors.deepTeal.withOpacity(0.26)
+                : AppColors.borderGray,
           ),
         ),
         child: Row(
@@ -245,10 +249,7 @@ class _NavSiteTile extends StatelessWidget {
 }
 
 class _SiteTopBar extends StatelessWidget {
-  const _SiteTopBar({
-    required this.controller,
-    required this.showBack,
-  });
+  const _SiteTopBar({required this.controller, required this.showBack});
 
   final SiteDetailsController controller;
   final bool showBack;
@@ -270,7 +271,8 @@ class _SiteTopBar extends StatelessWidget {
                 onPressed: () {
                   final previousRoute = Get.previousRoute;
 
-                  if (previousRoute.isEmpty || previousRoute == Get.currentRoute) {
+                  if (previousRoute.isEmpty ||
+                      previousRoute == Get.currentRoute) {
                     Get.offNamed(AppRoutes.sites);
                   } else {
                     Get.back();
@@ -294,7 +296,9 @@ class _SiteTopBar extends StatelessWidget {
             Obx(
               () => IconButton.filledTonal(
                 tooltip: 'Mettre à jour maintenant',
-                onPressed: controller.isRefreshing.value ? null : controller.refreshData,
+                onPressed: controller.isRefreshing.value
+                    ? null
+                    : controller.refreshData,
                 icon: controller.isRefreshing.value
                     ? const SizedBox(
                         width: 18,
@@ -316,6 +320,8 @@ class _SiteHeaderCard extends StatelessWidget {
 
   final SiteDetailsController controller;
 
+  static const double _headerContentHeight = 270;
+
   @override
   Widget build(BuildContext context) {
     final detail = controller.detail.value;
@@ -323,14 +329,15 @@ class _SiteHeaderCard extends StatelessWidget {
     if (detail == null) return const SizedBox.shrink();
 
     return PremiumCard(
-      padding: const EdgeInsets.all(26),
+      padding: const EdgeInsets.fromLTRB(22, 16, 22, 16),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final compact = constraints.maxWidth < 850;
+          final compact = constraints.maxWidth < 1180;
           final showDescriptionButton = _isTechnicianProjectUser();
 
           final title = Column(
             crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Wrap(
                 spacing: 10,
@@ -345,6 +352,8 @@ class _SiteHeaderCard extends StatelessWidget {
               const SizedBox(height: 16),
               Text(
                 detail.siteName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   color: AppColors.midnightNavy,
                   fontSize: 34,
@@ -356,6 +365,8 @@ class _SiteHeaderCard extends StatelessWidget {
               const SizedBox(height: 12),
               Text(
                 'Date de swap · ${Formatters.providerDate(detail.swapDate, brand: detail.brand)}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   color: AppColors.midnightNavy,
                   fontWeight: FontWeight.w800,
@@ -364,6 +375,8 @@ class _SiteHeaderCard extends StatelessWidget {
               const SizedBox(height: 4),
               Text(
                 'Date de mise en service · ${Formatters.providerDate(detail.gridConnectionDate, brand: detail.brand)}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   color: AppColors.mutedText,
                   fontWeight: FontWeight.w700,
@@ -372,32 +385,42 @@ class _SiteHeaderCard extends StatelessWidget {
             ],
           );
 
+          final gaugePanel = _HeaderRealVsPlannedGaugePanel(
+            controller: controller,
+          );
+
           final power = Container(
+            height: double.infinity,
             padding: const EdgeInsets.all(20),
             decoration: BoxDecoration(
               color: AppColors.midnightNavy,
               borderRadius: BorderRadius.circular(24),
             ),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.max,
               children: [
                 const Icon(
                   Icons.bolt_rounded,
                   color: AppColors.white,
-                  size: 28,
+                  size: 30,
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 14),
                 Text(
                   'Installed power',
+                  textAlign: TextAlign.center,
                   style: TextStyle(
                     color: AppColors.white.withOpacity(0.64),
-                    fontWeight: FontWeight.w700,
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 8),
                 Text(
                   Formatters.power(detail.installedPowerKw),
+                  textAlign: TextAlign.center,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: AppColors.white,
                     fontSize: 30,
@@ -414,37 +437,154 @@ class _SiteHeaderCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 title,
-              if (showDescriptionButton) ...[
-  const SizedBox(height: 18),
-  SizedBox(
-    width: double.infinity,
-    child: _SiteDescriptionActions(controller: controller),
-  ),
-],
                 const SizedBox(height: 18),
-                power,
+                SizedBox(
+                  width: double.infinity,
+                  height: _headerContentHeight,
+                  child: gaugePanel,
+                ),
+                if (showDescriptionButton) ...[
+                  const SizedBox(height: 18),
+                  SizedBox(
+                    width: double.infinity,
+                    height: _headerContentHeight,
+                    child: _SiteDescriptionActions(controller: controller),
+                  ),
+                ],
+                const SizedBox(height: 18),
+                SizedBox(
+                  width: double.infinity,
+                  height: _headerContentHeight,
+                  child: power,
+                ),
               ],
             );
           }
 
-          return Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(child: title),
-           if (showDescriptionButton) ...[
-  const SizedBox(width: 24),
-  SizedBox(
-    width: constraints.maxWidth >= 1100 ? 300 : 230,
-    child: _SiteDescriptionActions(controller: controller),
-  ),
-],
-const SizedBox(width: 12),
-SizedBox(width: 270, child: power),
-            ],
+          final gaugeWidth = constraints.maxWidth >= 1600
+              ? 640.0
+              : constraints.maxWidth >= 1450
+              ? 590.0
+              : 520.0;
+          final actionsWidth = constraints.maxWidth >= 1600
+              ? 340.0
+              : constraints.maxWidth >= 1450
+              ? 320.0
+              : 300.0;
+          final powerWidth = constraints.maxWidth >= 1600 ? 285.0 : 265.0;
+
+          return SizedBox(
+            height: _headerContentHeight,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(child: title),
+                const SizedBox(width: 18),
+                SizedBox(
+                  width: gaugeWidth,
+                  height: _headerContentHeight,
+                  child: gaugePanel,
+                ),
+                if (showDescriptionButton) ...[
+                  const SizedBox(width: 14),
+                  SizedBox(
+                    width: actionsWidth,
+                    height: _headerContentHeight,
+                    child: _SiteDescriptionActions(controller: controller),
+                  ),
+                ],
+                const SizedBox(width: 14),
+                SizedBox(
+                  width: powerWidth,
+                  height: _headerContentHeight,
+                  child: power,
+                ),
+              ],
+            ),
           );
         },
       ),
     );
+  }
+}
+
+class _HeaderRealVsPlannedGaugePanel extends StatelessWidget {
+  const _HeaderRealVsPlannedGaugePanel({required this.controller});
+
+  final SiteDetailsController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Obx(() {
+      final description = controller.siteDescription.value;
+      final loading = controller.isDescriptionLoading.value;
+      final actual = description?.performanceActualKwh;
+      final planned = description?.performanceTheoreticalKwh;
+      final index = description?.performanceIndexPercent;
+
+      if (loading && description == null) {
+        return const Center(
+          child: SizedBox(
+            width: 30,
+            height: 30,
+            child: CircularProgressIndicator(
+              strokeWidth: 2.6,
+              color: AppColors.deepTeal,
+            ),
+          ),
+        );
+      }
+
+      if (actual == null || planned == null || planned <= 0) {
+        return Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: const [
+              Icon(Icons.speed_rounded, color: AppColors.mutedText, size: 34),
+              SizedBox(height: 10),
+              Text(
+                'Performance indisponible',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: AppColors.midnightNavy,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              SizedBox(height: 4),
+              Text(
+                'Dernier jour monitorisé non trouvé',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: AppColors.mutedText,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      final maxValue = math.max(actual, planned) * 1.5;
+      final safeMax = maxValue <= 0 ? 1.0 : maxValue;
+      final performanceText = index == null ? '—' : _formatPercentPlain(index);
+
+      return Column(
+        children: [
+          Expanded(
+            child: _RealVsPlannedGauge(
+              actualKwh: actual,
+              plannedKwh: planned,
+              maxKwh: safeMax,
+              indexText: performanceText,
+            ),
+          ),
+          const SizedBox(height: 6),
+          _GaugeBottomLegend(actualKwh: actual, plannedKwh: planned),
+        ],
+      );
+    });
   }
 }
 
@@ -457,11 +597,15 @@ class _SiteDescriptionActions extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      mainAxisSize: MainAxisSize.max,
       children: [
-        _SiteDescriptionButton(controller: controller),
+        SizedBox(
+          height: 46,
+          child: _SiteDescriptionButton(controller: controller),
+        ),
         const SizedBox(height: 10),
-        _ComparablePerformanceCard(controller: controller),
+        Expanded(child: _ComparablePerformanceCard(controller: controller)),
       ],
     );
   }
@@ -487,16 +631,11 @@ class _ComparablePerformanceCard extends StatelessWidget {
           backgroundColor: AppColors.softWhite,
           borderColor: AppColors.borderGray,
           iconColor: AppColors.deepTeal,
-          rightTitle: 'Indice',
-          rightValue: '...',
-          rightSubtitle: 'Hors aujourd’hui',
         );
       }
 
       final currentYield = description?.currentSpecificYieldKwhPerKwp;
       final bestYield = description?.bestSpecificYieldKwhPerKwp;
-      final performanceIndex = description?.performanceIndexPercent;
-
       if (currentYield == null || bestYield == null || bestYield <= 0) {
         return _ComparableCardShell(
           icon: Icons.info_outline_rounded,
@@ -506,14 +645,14 @@ class _ComparablePerformanceCard extends StatelessWidget {
           backgroundColor: AppColors.softWhite,
           borderColor: AppColors.borderGray,
           iconColor: AppColors.mutedText,
-          rightTitle: 'Indice',
-          rightValue: performanceIndex == null ? '—' : _formatPercentPlain(performanceIndex),
-          rightSubtitle: description?.performanceIndexDate ?? 'Dernier jour monitorisé hors aujourd’hui',
         );
       }
 
-      final comparisonPercent = description?.comparisonPercent ?? ((currentYield / bestYield) * 100);
-      final gapPercent = description?.gapPercent ?? (100 - comparisonPercent).clamp(0, 100).toDouble();
+      final comparisonPercent =
+          description?.comparisonPercent ?? ((currentYield / bestYield) * 100);
+      final gapPercent =
+          description?.gapPercent ??
+          (100 - comparisonPercent).clamp(0, 100).toDouble();
       final displayedGap = gapPercent <= 0.05 ? 0.0 : -gapPercent;
       final isNormal = comparisonPercent >= 78;
 
@@ -522,9 +661,12 @@ class _ComparablePerformanceCard extends StatelessWidget {
       final bestSiteName = description?.bestSiteName?.toString();
 
       final subtitleParts = <String>[
-        if (governorate != null && governorate.trim().isNotEmpty) 'Gouvernorat $governorate',
-        if (bestSiteName != null && bestSiteName.trim().isNotEmpty) 'Meilleur: $bestSiteName',
-        description?.comparisonPeriod ?? 'dernier jour monitorisé hors aujourd’hui',
+        if (governorate != null && governorate.trim().isNotEmpty)
+          'Gouvernorat $governorate',
+        if (bestSiteName != null && bestSiteName.trim().isNotEmpty)
+          'Meilleur: $bestSiteName',
+        description?.comparisonPeriod ??
+            'dernier jour monitorisé hors aujourd’hui',
         if (comparableCount != null) '$comparableCount site(s) Healthy',
       ];
 
@@ -541,12 +683,7 @@ class _ComparablePerformanceCard extends StatelessWidget {
         borderColor: isNormal
             ? const Color(0xFFB7E4C7)
             : const Color(0xFFFFD8A8),
-        iconColor: isNormal
-            ? const Color(0xFF16A34A)
-            : const Color(0xFFF59E0B),
-        rightTitle: 'Indice',
-        rightValue: performanceIndex == null ? '—' : _formatPercentPlain(performanceIndex),
-        rightSubtitle: _performanceSubtitle(description),
+        iconColor: isNormal ? const Color(0xFF16A34A) : const Color(0xFFF59E0B),
       );
     });
   }
@@ -558,7 +695,8 @@ String _performanceSubtitle(SiteDescription? description) {
   if (actual != null && theoretical != null && theoretical > 0) {
     return '${_formatNumber(actual)} / ${_formatNumber(theoretical)} kWh';
   }
-  return description?.performanceIndexDate ?? 'Dernier jour monitorisé hors aujourd’hui';
+  return description?.performanceIndexDate ??
+      'Dernier jour monitorisé hors aujourd’hui';
 }
 
 String _formatPercentPlain(num value) {
@@ -569,6 +707,7 @@ String _formatPercent(num value) {
   final sign = value > 0 ? '+' : '';
   return '$sign${value.toStringAsFixed(1).replaceAll('.', ',')}%';
 }
+
 class _ComparableCardShell extends StatelessWidget {
   const _ComparableCardShell({
     required this.icon,
@@ -623,7 +762,9 @@ class _ComparableCardShell extends StatelessWidget {
               alignEnd: false,
             ),
           ),
-          if (rightTitle != null || rightValue != null || rightSubtitle != null) ...[
+          if (rightTitle != null ||
+              rightValue != null ||
+              rightSubtitle != null) ...[
             Container(
               width: 1.5,
               height: 62,
@@ -673,7 +814,9 @@ class _ComparableCardSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Row(
-      mainAxisAlignment: alignEnd ? MainAxisAlignment.end : MainAxisAlignment.start,
+      mainAxisAlignment: alignEnd
+          ? MainAxisAlignment.end
+          : MainAxisAlignment.start,
       children: [
         if (showIcon) ...[
           Container(
@@ -683,17 +826,15 @@ class _ComparableCardSection extends StatelessWidget {
               color: AppColors.white,
               borderRadius: BorderRadius.circular(14),
             ),
-            child: Icon(
-              icon,
-              color: iconColor,
-              size: 21,
-            ),
+            child: Icon(icon, color: iconColor, size: 21),
           ),
           const SizedBox(width: 10),
         ],
         Flexible(
           child: Column(
-            crossAxisAlignment: alignEnd ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            crossAxisAlignment: alignEnd
+                ? CrossAxisAlignment.end
+                : CrossAxisAlignment.start,
             children: [
               Text(
                 title,
@@ -741,7 +882,8 @@ class _ComparableCardSection extends StatelessWidget {
 
 bool _isTechnicianProjectUser() {
   if (!Get.isRegistered<AuthController>()) return false;
-  return Get.find<AuthController>().user.value?.scope == 'PROJECT';
+  final scope = Get.find<AuthController>().user.value?.scope;
+  return scope == 'PROJECT' || scope == 'OOREDOO';
 }
 
 class _SiteDescriptionButton extends StatelessWidget {
@@ -775,7 +917,9 @@ class _SiteDescriptionButton extends StatelessWidget {
           backgroundColor: AppColors.deepTeal,
           foregroundColor: AppColors.white,
           padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
           textStyle: const TextStyle(fontWeight: FontWeight.w900),
         ),
       ),
@@ -808,9 +952,8 @@ class _SiteDescriptionDialogState extends State<_SiteDescriptionDialog> {
           ? ''
           : _formatNumber(description!.orientationDeg!),
     );
-    _photos = description?.photos
-            .map(_EditableSitePhoto.fromExisting)
-            .toList() ??
+    _photos =
+        description?.photos.map(_EditableSitePhoto.fromExisting).toList() ??
         <_EditableSitePhoto>[];
   }
 
@@ -908,13 +1051,17 @@ class _SiteDescriptionDialogState extends State<_SiteDescriptionDialog> {
                   onPrevious: () {
                     if (_photos.isEmpty) return;
                     setState(() {
-                      _photoIndex = (_photoIndex - 1).clamp(0, _photos.length - 1).toInt();
+                      _photoIndex = (_photoIndex - 1)
+                          .clamp(0, _photos.length - 1)
+                          .toInt();
                     });
                   },
                   onNext: () {
                     if (_photos.isEmpty) return;
                     setState(() {
-                      _photoIndex = (_photoIndex + 1).clamp(0, _photos.length - 1).toInt();
+                      _photoIndex = (_photoIndex + 1)
+                          .clamp(0, _photos.length - 1)
+                          .toInt();
                     });
                   },
                 ),
@@ -941,7 +1088,9 @@ class _SiteDescriptionDialogState extends State<_SiteDescriptionDialog> {
                 const SizedBox(height: 16),
                 TextField(
                   controller: _orientationController,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
                   decoration: InputDecoration(
                     labelText: 'Orientation du site (degré)',
                     hintText: 'Exemple: 180',
@@ -966,7 +1115,9 @@ class _SiteDescriptionDialogState extends State<_SiteDescriptionDialog> {
                         onPressed: () => Get.back(),
                         style: OutlinedButton.styleFrom(
                           padding: const EdgeInsets.symmetric(vertical: 16),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(18),
+                          ),
                         ),
                         child: const Text('Annuler'),
                       ),
@@ -982,16 +1133,22 @@ class _SiteDescriptionDialogState extends State<_SiteDescriptionDialog> {
                                     note: _noteController.text,
                                     orientationDeg: _orientationController.text,
                                     retainedPhotoIds: _photos
-                                        .where((photo) => photo.isExisting && photo.id != 'legacy-photo')
+                                        .where(
+                                          (photo) =>
+                                              photo.isExisting &&
+                                              photo.id != 'legacy-photo',
+                                        )
                                         .map((photo) => photo.id!)
                                         .toList(),
                                     photosToAdd: _photos
                                         .where((photo) => photo.isNew)
-                                        .map((photo) => MultipartFilePayload(
-                                              fieldName: 'photos',
-                                              bytes: photo.bytes!,
-                                              fileName: photo.filename,
-                                            ))
+                                        .map(
+                                          (photo) => MultipartFilePayload(
+                                            fieldName: 'photos',
+                                            bytes: photo.bytes!,
+                                            fileName: photo.filename,
+                                          ),
+                                        )
                                         .toList(),
                                   );
                                 },
@@ -999,7 +1156,9 @@ class _SiteDescriptionDialogState extends State<_SiteDescriptionDialog> {
                               ? const SizedBox(
                                   width: 18,
                                   height: 18,
-                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
                                 )
                               : const Icon(Icons.save_outlined),
                           label: const Text('Enregistrer'),
@@ -1007,8 +1166,12 @@ class _SiteDescriptionDialogState extends State<_SiteDescriptionDialog> {
                             backgroundColor: AppColors.deepTeal,
                             foregroundColor: AppColors.white,
                             padding: const EdgeInsets.symmetric(vertical: 16),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-                            textStyle: const TextStyle(fontWeight: FontWeight.w900),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(18),
+                            ),
+                            textStyle: const TextStyle(
+                              fontWeight: FontWeight.w900,
+                            ),
                           ),
                         ),
                       ),
@@ -1052,7 +1215,8 @@ class _DescriptionNotice extends StatelessWidget {
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
-                  description.notice?.toString() ?? 'Comparaison indisponible pour le moment.',
+                  description.notice?.toString() ??
+                      'Comparaison indisponible pour le moment.',
                   style: const TextStyle(
                     color: AppColors.midnightNavy,
                     fontSize: 15,
@@ -1070,21 +1234,36 @@ class _DescriptionNotice extends StatelessWidget {
             children: [
               _NoticePill(
                 label: 'Date de swap',
-                value: Formatters.providerDate(description.swapDate, brand: description.brand),
+                value: Formatters.providerDate(
+                  description.swapDate,
+                  brand: description.brand,
+                ),
               ),
               _NoticePill(
                 label: 'Mise en service',
-                value: Formatters.providerDate(description.gridConnectionDate, brand: description.brand),
+                value: Formatters.providerDate(
+                  description.gridConnectionDate,
+                  brand: description.brand,
+                ),
               ),
               if (description.totalEnergyKwh != null)
                 _NoticePill(
                   label: 'Production totale',
-                  value: Formatters.energy(description.totalEnergyKwh, decimals: 2),
+                  value: Formatters.energy(
+                    description.totalEnergyKwh,
+                    decimals: 2,
+                  ),
                 ),
               if (currentYield != null)
-                _NoticePill(label: 'Rendement site', value: '${_formatNumber(currentYield)} kWh/kWc'),
+                _NoticePill(
+                  label: 'Rendement site',
+                  value: '${_formatNumber(currentYield)} kWh/kWc',
+                ),
               if (bestYield != null)
-                _NoticePill(label: 'Rendement meilleur', value: '${_formatNumber(bestYield)} kWh/kWc'),
+                _NoticePill(
+                  label: 'Rendement meilleur',
+                  value: '${_formatNumber(bestYield)} kWh/kWc',
+                ),
               if (description.bestSiteName != null)
                 _NoticePill(
                   label: 'Meilleur site',
@@ -1093,9 +1272,15 @@ class _DescriptionNotice extends StatelessWidget {
                       : '${description.bestSiteName}',
                 ),
               if (description.governorate != null)
-                _NoticePill(label: 'Gouvernorat', value: description.governorate.toString()),
+                _NoticePill(
+                  label: 'Gouvernorat',
+                  value: description.governorate.toString(),
+                ),
               if (description.comparableSitesCount != null)
-                _NoticePill(label: 'Comparables', value: description.comparableSitesCount.toString()),
+                _NoticePill(
+                  label: 'Comparables',
+                  value: description.comparableSitesCount.toString(),
+                ),
               if (description.comparisonPercent != null)
                 _NoticePill(
                   label: 'Comparaison',
@@ -1131,12 +1316,18 @@ class _NoticePill extends StatelessWidget {
       ),
       child: RichText(
         text: TextSpan(
-          style: const TextStyle(color: AppColors.slateGraphite, fontWeight: FontWeight.w700),
+          style: const TextStyle(
+            color: AppColors.slateGraphite,
+            fontWeight: FontWeight.w700,
+          ),
           children: [
             TextSpan(text: '$label: '),
             TextSpan(
               text: value,
-              style: const TextStyle(color: AppColors.midnightNavy, fontWeight: FontWeight.w900),
+              style: const TextStyle(
+                color: AppColors.midnightNavy,
+                fontWeight: FontWeight.w900,
+              ),
             ),
           ],
         ),
@@ -1170,10 +1361,7 @@ class _EditableSitePhoto {
   }
 
   factory _EditableSitePhoto.fromPicked(PickedSitePhoto photo) {
-    return _EditableSitePhoto(
-      bytes: photo.bytes,
-      filename: photo.filename,
-    );
+    return _EditableSitePhoto(bytes: photo.bytes, filename: photo.filename);
   }
 }
 
@@ -1199,7 +1387,9 @@ class _PhotoEditor extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasPhotos = photos.isNotEmpty;
-    final safeIndex = hasPhotos ? selectedIndex.clamp(0, photos.length - 1).toInt() : 0;
+    final safeIndex = hasPhotos
+        ? selectedIndex.clamp(0, photos.length - 1).toInt()
+        : 0;
     final selected = hasPhotos ? photos[safeIndex] : null;
 
     Widget image;
@@ -1221,16 +1411,26 @@ class _PhotoEditor extends StatelessWidget {
       image = Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: const [
-          Icon(Icons.add_photo_alternate_outlined, size: 52, color: AppColors.deepTeal),
+          Icon(
+            Icons.add_photo_alternate_outlined,
+            size: 52,
+            color: AppColors.deepTeal,
+          ),
           SizedBox(height: 12),
           Text(
             'Aucune photo pour ce site',
-            style: TextStyle(color: AppColors.midnightNavy, fontWeight: FontWeight.w900),
+            style: TextStyle(
+              color: AppColors.midnightNavy,
+              fontWeight: FontWeight.w900,
+            ),
           ),
           SizedBox(height: 4),
           Text(
             'Clique sur ajouter pour importer une ou plusieurs photos.',
-            style: TextStyle(color: AppColors.mutedText, fontWeight: FontWeight.w700),
+            style: TextStyle(
+              color: AppColors.mutedText,
+              fontWeight: FontWeight.w700,
+            ),
           ),
         ],
       );
@@ -1263,7 +1463,10 @@ class _PhotoEditor extends StatelessWidget {
           hasPhotos
               ? '${safeIndex + 1}/${photos.length} · ${selected!.filename}'
               : 'Aucune photo sélectionnée',
-          style: const TextStyle(color: AppColors.mutedText, fontWeight: FontWeight.w700),
+          style: const TextStyle(
+            color: AppColors.mutedText,
+            fontWeight: FontWeight.w700,
+          ),
         ),
         const SizedBox(height: 12),
         ClipRRect(
@@ -1297,7 +1500,9 @@ class _PhotoEditor extends StatelessWidget {
                     bottom: 0,
                     child: Center(
                       child: IconButton.filledTonal(
-                        onPressed: safeIndex >= photos.length - 1 ? null : onNext,
+                        onPressed: safeIndex >= photos.length - 1
+                            ? null
+                            : onNext,
                         icon: const Icon(Icons.chevron_right_rounded),
                       ),
                     ),
@@ -1343,7 +1548,9 @@ class _PhotoEditor extends StatelessWidget {
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(14),
                       border: Border.all(
-                        color: selectedThumb ? AppColors.deepTeal : AppColors.borderGray,
+                        color: selectedThumb
+                            ? AppColors.deepTeal
+                            : AppColors.borderGray,
                         width: selectedThumb ? 2 : 1,
                       ),
                     ),
@@ -1409,11 +1616,12 @@ class _SiteKpiGrid extends StatelessWidget {
         final columns = constraints.maxWidth >= 1060
             ? 4
             : constraints.maxWidth >= 680
-                ? 2
-                : 1;
+            ? 2
+            : 1;
 
         final spacing = 16.0;
-        final width = (constraints.maxWidth - spacing * (columns - 1)) / columns;
+        final width =
+            (constraints.maxWidth - spacing * (columns - 1)) / columns;
 
         final cards = [
           MetricCard(
@@ -1441,7 +1649,9 @@ class _SiteKpiGrid extends StatelessWidget {
         return Wrap(
           spacing: spacing,
           runSpacing: spacing,
-          children: cards.map((card) => SizedBox(width: width, child: card)).toList(),
+          children: cards
+              .map((card) => SizedBox(width: width, child: card))
+              .toList(),
         );
       },
     );
@@ -1512,7 +1722,10 @@ class _ChartsCard extends StatelessWidget {
                       showSelectedIcon: false,
                     ),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
                       decoration: BoxDecoration(
                         color: AppColors.softWhite,
                         borderRadius: BorderRadius.circular(999),
@@ -1534,7 +1747,10 @@ class _ChartsCard extends StatelessWidget {
                               borderRadius: BorderRadius.circular(999),
                               onTap: isHistoryLoading
                                   ? null
-                                  : () => _openChartPeriodPicker(context, controller),
+                                  : () => _openChartPeriodPicker(
+                                      context,
+                                      controller,
+                                    ),
                               child: Padding(
                                 padding: const EdgeInsets.symmetric(
                                   horizontal: 10,
@@ -1751,23 +1967,34 @@ Future<DateTime?> _showMonthPicker({
                     shrinkWrap: true,
                     itemCount: 12,
                     physics: const NeverScrollableScrollPhysics(),
-                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 3,
-                      crossAxisSpacing: 10,
-                      mainAxisSpacing: 10,
-                      childAspectRatio: 2.4,
-                    ),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 3,
+                          crossAxisSpacing: 10,
+                          mainAxisSpacing: 10,
+                          childAspectRatio: 2.4,
+                        ),
                     itemBuilder: (context, index) {
                       final month = index + 1;
                       final candidate = DateTime(displayedYear, month, 1);
 
-                      final minMonth = DateTime(firstDate.year, firstDate.month, 1);
-                      final maxMonth = DateTime(lastDate.year, lastDate.month, 1);
+                      final minMonth = DateTime(
+                        firstDate.year,
+                        firstDate.month,
+                        1,
+                      );
+                      final maxMonth = DateTime(
+                        lastDate.year,
+                        lastDate.month,
+                        1,
+                      );
 
                       final disabled =
-                          candidate.isBefore(minMonth) || candidate.isAfter(maxMonth);
+                          candidate.isBefore(minMonth) ||
+                          candidate.isAfter(maxMonth);
 
-                      final selected = initialDate.year == displayedYear &&
+                      final selected =
+                          initialDate.year == displayedYear &&
                           initialDate.month == month;
 
                       return OutlinedButton(
@@ -1775,10 +2002,12 @@ Future<DateTime?> _showMonthPicker({
                             ? null
                             : () => Navigator.of(dialogContext).pop(candidate),
                         style: OutlinedButton.styleFrom(
-                          backgroundColor:
-                              selected ? AppColors.midnightNavy : AppColors.white,
-                          foregroundColor:
-                              selected ? AppColors.white : AppColors.midnightNavy,
+                          backgroundColor: selected
+                              ? AppColors.midnightNavy
+                              : AppColors.white,
+                          foregroundColor: selected
+                              ? AppColors.white
+                              : AppColors.midnightNavy,
                           side: BorderSide(
                             color: selected
                                 ? AppColors.midnightNavy
@@ -1790,9 +2019,7 @@ Future<DateTime?> _showMonthPicker({
                         ),
                         child: Text(
                           months[index],
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w900,
-                          ),
+                          style: const TextStyle(fontWeight: FontWeight.w900),
                         ),
                       );
                     },
@@ -1855,10 +2082,12 @@ Future<DateTime?> _showYearPicker({
                   Navigator.of(dialogContext).pop(DateTime(year, 1, 1));
                 },
                 style: OutlinedButton.styleFrom(
-                  backgroundColor:
-                      selected ? AppColors.midnightNavy : AppColors.white,
-                  foregroundColor:
-                      selected ? AppColors.white : AppColors.midnightNavy,
+                  backgroundColor: selected
+                      ? AppColors.midnightNavy
+                      : AppColors.white,
+                  foregroundColor: selected
+                      ? AppColors.white
+                      : AppColors.midnightNavy,
                   side: BorderSide(
                     color: selected
                         ? AppColors.midnightNavy
@@ -1870,9 +2099,7 @@ Future<DateTime?> _showYearPicker({
                 ),
                 child: Text(
                   year.toString(),
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w900,
-                  ),
+                  style: const TextStyle(fontWeight: FontWeight.w900),
                 ),
               );
             },
@@ -1935,10 +2162,7 @@ class _SelectedPeriodKpi extends StatelessWidget {
                           color: AppColors.white,
                         ),
                       )
-                    : const Icon(
-                        Icons.bolt_rounded,
-                        color: AppColors.white,
-                      ),
+                    : const Icon(Icons.bolt_rounded, color: AppColors.white),
               ),
               const SizedBox(width: 14),
               Expanded(
@@ -1975,6 +2199,233 @@ class _SelectedPeriodKpi extends StatelessWidget {
         ),
       );
     });
+  }
+}
+
+class _GaugeBottomLegend extends StatelessWidget {
+  const _GaugeBottomLegend({required this.actualKwh, required this.plannedKwh});
+
+  final double actualKwh;
+  final double plannedKwh;
+
+  @override
+  Widget build(BuildContext context) {
+    const actualColor = AppColors.deepTeal;
+    const plannedColor = Color(0xFFF59E0B);
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        _GaugeLegendChip(
+          label: 'Réel',
+          value: '${_formatNumber(actualKwh)} kWh',
+          color: actualColor,
+        ),
+        const SizedBox(width: 10),
+        _GaugeLegendChip(
+          label: 'Prévu',
+          value: '${_formatNumber(plannedKwh)} kWh',
+          color: plannedColor,
+        ),
+      ],
+    );
+  }
+}
+
+class _GaugeLegendChip extends StatelessWidget {
+  const _GaugeLegendChip({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withOpacity(0.35)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '$label : ',
+            style: TextStyle(
+              color: color,
+              fontSize: 11,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              color: AppColors.midnightNavy,
+              fontSize: 11,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RealVsPlannedGauge extends StatelessWidget {
+  const _RealVsPlannedGauge({
+    required this.actualKwh,
+    required this.plannedKwh,
+    required this.maxKwh,
+    required this.indexText,
+  });
+
+  final double actualKwh;
+  final double plannedKwh;
+  final double maxKwh;
+  final String indexText;
+
+  static const double _startAngle = 150;
+  static const double _endAngle = 30;
+
+  @override
+  Widget build(BuildContext context) {
+    const actualColor = AppColors.deepTeal;
+    const plannedColor = Color(0xFFF59E0B);
+
+    final safeMax = maxKwh <= 0 ? 1.0 : maxKwh;
+    final actual = actualKwh.clamp(0.0, safeMax).toDouble();
+    final planned = plannedKwh.clamp(0.0, safeMax).toDouble();
+
+    return SizedBox.expand(
+      child: sfg.SfRadialGauge(
+        enableLoadingAnimation: true,
+        animationDuration: 650,
+        axes: <sfg.RadialAxis>[
+          sfg.RadialAxis(
+            minimum: 0,
+            maximum: safeMax,
+            showLabels: false,
+            showTicks: false,
+            startAngle: _startAngle,
+            endAngle: _endAngle,
+            radiusFactor: 1.08,
+            axisLineStyle: sfg.AxisLineStyle(
+              thickness: 0.14,
+              thicknessUnit: sfg.GaugeSizeUnit.factor,
+              cornerStyle: sfg.CornerStyle.bothCurve,
+              gradient: SweepGradient(
+                colors: [
+                  actualColor.withOpacity(0.16),
+                  actualColor.withOpacity(0.74),
+                  plannedColor.withOpacity(0.96),
+                ],
+              ),
+            ),
+            pointers: <sfg.GaugePointer>[
+              sfg.NeedlePointer(
+                value: planned,
+                enableAnimation: true,
+                needleLength: 0.90,
+                needleStartWidth: 0,
+                needleEndWidth: 5,
+                needleColor: plannedColor,
+                knobStyle: const sfg.KnobStyle(
+                  knobRadius: 0.038,
+                  color: AppColors.white,
+                  borderColor: plannedColor,
+                  borderWidth: 1.4,
+                ),
+                tailStyle: sfg.TailStyle(
+                  color: plannedColor.withOpacity(0.94),
+                  width: 5,
+                  length: 0.12,
+                ),
+              ),
+              sfg.NeedlePointer(
+                value: actual,
+                enableAnimation: true,
+                needleLength: 1.00,
+                needleStartWidth: 0,
+                needleEndWidth: 6,
+                needleColor: actualColor,
+                knobStyle: const sfg.KnobStyle(
+                  knobRadius: 0.048,
+                  color: AppColors.white,
+                  borderColor: actualColor,
+                  borderWidth: 1.7,
+                ),
+                tailStyle: sfg.TailStyle(
+                  color: actualColor,
+                  width: 6,
+                  length: 0.15,
+                ),
+              ),
+            ],
+            annotations: [
+              sfg.GaugeAnnotation(
+                angle: 90,
+                positionFactor: 0.05,
+                widget: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppColors.white.withOpacity(0.88),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(color: actualColor.withOpacity(0.18)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: actualColor.withOpacity(0.12),
+                        blurRadius: 14,
+                        offset: const Offset(0, 6),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        indexText,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: actualColor,
+                          fontSize: 23,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: -0.5,
+                        ),
+                      ),
+                      const SizedBox(height: 1),
+                      Text(
+                        'Indice',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: AppColors.midnightNavy.withOpacity(0.55),
+                          fontSize: 10,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -2016,7 +2467,10 @@ class _DevicesCard extends StatelessWidget {
                   ],
                 ),
               ),
-              Obx(() => _HeaderChip(label: '${controller.devices.length} devices')),
+              Obx(
+                () =>
+                    _HeaderChip(label: '${controller.devices.length} devices'),
+              ),
             ],
           ),
           const SizedBox(height: 18),
@@ -2035,7 +2489,9 @@ class _DevicesCard extends StatelessWidget {
 
                 if (compact) {
                   return Column(
-                    children: devices.map((device) => _DeviceTile(device: device)).toList(),
+                    children: devices
+                        .map((device) => _DeviceTile(device: device))
+                        .toList(),
                   );
                 }
 
@@ -2060,12 +2516,18 @@ class _DevicesCard extends StatelessWidget {
                       ),
                       ...devices.map(
                         (device) => TableRow(
-                          decoration: const BoxDecoration(color: AppColors.white),
+                          decoration: const BoxDecoration(
+                            color: AppColors.white,
+                          ),
                           children: [
                             _DeviceCell(device.devName),
                             _DeviceCell(device.devTypeId?.toString() ?? '—'),
-                            _DeviceCell(device.model.isEmpty ? '—' : device.model),
-                            _DeviceCell(device.esnCode.isEmpty ? '—' : device.esnCode),
+                            _DeviceCell(
+                              device.model.isEmpty ? '—' : device.model,
+                            ),
+                            _DeviceCell(
+                              device.esnCode.isEmpty ? '—' : device.esnCode,
+                            ),
                           ],
                         ),
                       ),

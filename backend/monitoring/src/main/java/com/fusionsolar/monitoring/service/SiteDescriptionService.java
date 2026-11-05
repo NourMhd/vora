@@ -110,7 +110,7 @@ public class SiteDescriptionService {
             throw new ResourceNotFoundException("Site not found or inactive: " + siteCode + " for brand: " + brand);
         }
 
-        if (currentSiteAccessService.currentScope() != SiteAccessScope.PROJECT || !SiteAccessPolicy.isProjectSite(site)) {
+        if (currentSiteAccessService.currentScope() == SiteAccessScope.INDEPENDENT || !SiteAccessPolicy.isProjectSite(site)) {
             throw new ResourceNotFoundException("Description site is available only for technician project sites.");
         }
 
@@ -535,7 +535,7 @@ public class SiteDescriptionService {
                 continue;
             }
 
-            Optional<Double> dayHistoryTotal = realKwhFromDayHistory(site, cursor);
+            Optional<Double> dayHistoryTotal = realKwhFromMonthHistory(site, cursor);
             if (dayHistoryTotal.isPresent()) {
                 Double theoreticalKwh = productionEstimationService.theoreticalDailyKwh(production, cursor);
                 return Optional.of(new ProductionDayResult(
@@ -547,6 +547,42 @@ public class SiteDescriptionService {
             }
 
             cursor = cursor.minusDays(1);
+        }
+
+        return Optional.empty();
+    }
+
+    private Optional<Double> realKwhFromMonthHistory(SiteDocument site, LocalDate day) {
+        if (site == null || day == null) {
+            return Optional.empty();
+        }
+
+        String monthBucket = day.toString().substring(0, 7);
+
+        Optional<SiteHistoryDocument> history = findHistory(
+                site,
+                HistoryGranularity.MONTH,
+                monthBucket
+        );
+
+        if (history.isEmpty() || history.get().getPoints() == null || history.get().getPoints().isEmpty()) {
+            return Optional.empty();
+        }
+
+        for (HistoryPointDto point : history.get().getPoints()) {
+            if (point == null || point.getCollectTime() == null) {
+                continue;
+            }
+
+            LocalDate pointDay = toLocalDate(point.getCollectTime());
+            if (!day.equals(pointDay)) {
+                continue;
+            }
+
+            Double value = productionEstimationService.normalizeHistoryValue(point.getValue());
+            if (value != null && value > ProductionEstimationService.EPSILON) {
+                return Optional.of(round2(value));
+            }
         }
 
         return Optional.empty();

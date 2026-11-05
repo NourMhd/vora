@@ -6,7 +6,8 @@ import '../../../data/models/daily_comparison_report.dart';
 import '../../../data/repositories/monitoring_repository.dart';
 
 class ComparatifController extends GetxController {
-  ComparatifController({required MonitoringRepository repository}) : _repository = repository;
+  ComparatifController({required MonitoringRepository repository})
+    : _repository = repository;
 
   static const List<String> _defaultSiteCodes = [
     'ARI_0222',
@@ -43,7 +44,7 @@ class ComparatifController extends GetxController {
     } on ApiException catch (e) {
       errorMessage.value = e.message;
     } catch (_) {
-      errorMessage.value = 'Impossible de charger le comparatif ARI.';
+      errorMessage.value = 'Impossible de charger le comparatif.';
     } finally {
       isLoading.value = false;
     }
@@ -70,7 +71,7 @@ class ComparatifController extends GetxController {
 
   Future<void> applySelection() async {
     if (selectedSiteCodes.isEmpty) {
-      errorMessage.value = 'Sélectionne au moins un site ARI.';
+      errorMessage.value = 'Sélectionnez au moins un site.';
       return;
     }
 
@@ -84,7 +85,7 @@ class ComparatifController extends GetxController {
     } else {
       next.remove(siteCode);
     }
-    selectedSiteCodes.value = next;
+    selectedSiteCodes.assignAll(next);
   }
 
   bool isSelected(String siteCode) => selectedSiteCodes.contains(siteCode);
@@ -116,16 +117,25 @@ class ComparatifController extends GetxController {
 
   DateTime get yesterday {
     final now = DateTime.now();
-    return DateTime(now.year, now.month, now.day).subtract(const Duration(days: 1));
+    return DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).subtract(const Duration(days: 1));
   }
 
-  DateTime _dateOnly(DateTime value) => DateTime(value.year, value.month, value.day);
+  DateTime _dateOnly(DateTime value) =>
+      DateTime(value.year, value.month, value.day);
 
   Future<void> _loadReport() async {
     report.value = await _repository.getAriDailyComparison(
       siteCodes: selectedSiteCodes.toList()..sort(),
-      startDate: selectedStartDate.value == null ? null : Formatters.apiDay(selectedStartDate.value!),
-      endDate: selectedEndDate.value == null ? null : Formatters.apiDay(selectedEndDate.value!),
+      startDate: selectedStartDate.value == null
+          ? null
+          : Formatters.apiDay(selectedStartDate.value!),
+      endDate: selectedEndDate.value == null
+          ? null
+          : Formatters.apiDay(selectedEndDate.value!),
     );
   }
 
@@ -133,12 +143,14 @@ class ComparatifController extends GetxController {
     if (selectedSiteCodes.isNotEmpty) return;
 
     final availableCodes = availableSites.map((site) => site.siteCode).toSet();
-    final defaultCodes = _defaultSiteCodes.where(availableCodes.contains).toSet();
+    final defaultCodes = _defaultSiteCodes
+        .where(availableCodes.contains)
+        .toSet();
 
     if (defaultCodes.isNotEmpty) {
-      selectedSiteCodes.value = defaultCodes;
+      selectedSiteCodes.assignAll(defaultCodes);
     } else if (availableSites.isNotEmpty) {
-      selectedSiteCodes.value = {availableSites.first.siteCode};
+      selectedSiteCodes.assignAll({availableSites.first.siteCode});
     }
   }
 }

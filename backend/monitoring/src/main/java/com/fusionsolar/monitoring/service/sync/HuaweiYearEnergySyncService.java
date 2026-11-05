@@ -192,6 +192,16 @@ private boolean yearEnergyEnabled;
                 .toList();
     }
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.data.mongodb.core.MongoTemplate mongo;
+
+    private void persistYear(SiteDocument site) {
+        mongo.updateFirst(org.springframework.data.mongodb.core.query.Query.query(
+                org.springframework.data.mongodb.core.query.Criteria.where("_id").is(site.getId())),
+                new org.springframework.data.mongodb.core.query.Update().set("yearEnergyKwh", site.getYearEnergyKwh())
+                        .set("yearEnergyLastSyncAt", site.getYearEnergyLastSyncAt()), SiteDocument.class);
+    }
+
     private boolean syncCurrentYearEnergy(
             SiteDocument site,
             String currentYear,
@@ -211,7 +221,7 @@ private boolean yearEnergyEnabled;
              */
             site.setYearEnergyLastSyncAt(now);
             site.setUpdatedAt(now);
-            siteRepository.save(site);
+            persistYear(site);
 
             log.warn(
                     "Huawei year history is empty for site {} while monthEnergy={} kWh. Previous yearEnergy={} kWh kept.",
@@ -230,7 +240,7 @@ private boolean yearEnergyEnabled;
         site.setYearEnergyLastSyncAt(now);
         site.setUpdatedAt(now);
 
-        siteRepository.save(site);
+        persistYear(site);
 
         log.info(
                 "Huawei year energy synced for site {}. historyYear={} kWh, month={} kWh, saved={} kWh",

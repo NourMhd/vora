@@ -20,25 +20,22 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
- * Backfill Solis optimisé pour les buckets MONTH/YEAR.
+ * Backfill Solis pour les buckets MONTH/YEAR.
  *
- * Les endpoints Solis stationMonthEnergyList/stationYearEnergyList acceptent une liste idList
- * de plusieurs stations. On utilise donc ce worker en batch pour remplir rapidement les courbes
- * mois/année, puis SiteHistoryBackfillService garde le DAY en site par site.
+ * Règle importante:
+ * - MONTH = production journalière kWh.
+ * - DAY = courbe puissance kW.
+ * - Les KPI journaliers utilisent MONTH, jamais DAY.
+ * - Pour le mois courant, on sauvegarde uniquement les jours terminés jusqu'à hier.
  */
 @Slf4j
 @Service
@@ -47,7 +44,6 @@ import java.util.stream.Collectors;
 public class SolisBatchHistoryBackfillService {
 
     private static final ZoneId TUNIS_ZONE = ZoneId.of("Africa/Tunis");
-    private static final DateTimeFormatter DISPLAY_DATE_FORMATTER = DateTimeFormatter.ofPattern("dd/MM/yyyy");
 
     private final SiteRepository siteRepository;
     private final SiteHistoryRepository siteHistoryRepository;
@@ -59,7 +55,7 @@ public class SolisBatchHistoryBackfillService {
     @Value("${app.solis-batch-backfill.enabled:true}")
     private boolean enabled;
 
-    @Value("${app.solis-batch-backfill.batch-size:100}")
+    @Value("${app.solis-batch-backfill.batch-size:1}")
     private int batchSize;
 
     @Value("${app.solis-batch-backfill.max-calls-per-run:2}")
@@ -71,11 +67,23 @@ public class SolisBatchHistoryBackfillService {
     @Value("${app.solis-batch-backfill.empty-history-retry-ms:${app.history-backfill.empty-history-retry-ms:86400000}}")
     private long emptyHistoryRetryMs;
 
-    @Value("${app.solis-batch-backfill.current-month-refresh-ms:${app.history-backfill.current-month-refresh-ms:3600000}}")
+    @Value("${app.solis-batch-backfill.current-month-refresh-ms:${app.history-backfill.current-month-refresh-ms:21600000}}")
     private long currentMonthRefreshMs;
+
+    @Value("${app.solis-batch-backfill.incomplete-month-refresh-ms:${app.history-backfill.incomplete-month-refresh-ms:21600000}}")
+    private long incompleteMonthRefreshMs;
+
+    @Value("${app.solis-batch-backfill.invalid-value-month-refresh-ms:${app.history-backfill.invalid-value-month-refresh-ms:21600000}}")
+    private long invalidValueMonthRefreshMs;
+
+    @Value("${app.solis-batch-backfill.month-finalization-grace-hours:${app.history-backfill.month-finalization-grace-hours:6}}")
+    private int monthFinalizationGraceHours;
 
     @Value("${app.solis-batch-backfill.current-year-refresh-ms:${app.history-backfill.current-year-refresh-ms:21600000}}")
     private long currentYearRefreshMs;
+
+    @Value("${app.history-backfill.solis-year-backfill-enabled:false}")
+    private boolean solisYearBackfillEnabled;
 
     @Scheduled(
             initialDelayString = "${app.solis-batch-backfill.initial-delay-ms:180000}",
@@ -124,7 +132,8 @@ public class SolisBatchHistoryBackfillService {
 
             List<SiteDocument> dueSites = dueSites(sites, candidate)
                     .stream()
-                    .limit(Math.max(1, Math.min(100, batchSize)))
+                    // Solis reste en single-station pour éviter les réponses globales / non scopées.
+                    .limit(Math.max(1, Math.min(1, batchSize)))
                     .toList();
 
             if (dueSites.isEmpty()) {
@@ -146,32 +155,36 @@ public class SolisBatchHistoryBackfillService {
 
         List<HistoryCandidate> candidates = new ArrayList<>();
 
-        // Buckets courants en premier.
-        candidates.add(new HistoryCandidate(HistoryGranularity.MONTH, "month", currentMonth.toString(), true));
-        candidates.add(new HistoryCandidate(HistoryGranularity.YEAR, "year", String.valueOf(currentYear), true));
+        // Priorité absolue: MONTH, car c'est utilisé par KPI jour, comparaison, alertes et performance.
+        candidates.add(new HistoryCandidate(
+                HistoryGranularity.MONTH,
+                "month",
+                currentMonth.toString(),
+                true
+        ));
 
-        // YEAR historique: rentable pour la courbe année.
-        for (int year = currentYear; year >= firstMonth.getYear(); year--) {
-            String bucket = String.valueOf(year);
-            candidates.add(new HistoryCandidate(
-                    HistoryGranularity.YEAR,
-                    "year",
-                    bucket,
-                    bucket.equals(String.valueOf(currentYear))
-            ));
-        }
-
-        // MONTH historique: rentable pour la courbe mois.
-        YearMonth cursor = currentMonth;
-        while (!cursor.isBefore(firstMonth)) {
-            String bucket = cursor.toString();
+        YearMonth monthCursor = currentMonth.minusMonths(1);
+        while (!monthCursor.isBefore(firstMonth)) {
             candidates.add(new HistoryCandidate(
                     HistoryGranularity.MONTH,
                     "month",
-                    bucket,
-                    bucket.equals(currentMonth.toString())
+                    monthCursor.toString(),
+                    false
             ));
-            cursor = cursor.minusMonths(1);
+            monthCursor = monthCursor.minusMonths(1);
+        }
+
+        // YEAR Solis est optionnel. Désactivé par défaut pour ne pas consommer les appels avant MONTH.
+        if (solisYearBackfillEnabled) {
+            for (int year = currentYear; year >= firstMonth.getYear(); year--) {
+                String bucket = String.valueOf(year);
+                candidates.add(new HistoryCandidate(
+                        HistoryGranularity.YEAR,
+                        "year",
+                        bucket,
+                        year == currentYear
+                ));
+            }
         }
 
         return candidates;
@@ -179,7 +192,11 @@ public class SolisBatchHistoryBackfillService {
 
     private List<SiteDocument> dueSites(List<SiteDocument> sites, HistoryCandidate candidate) {
         Map<String, SiteHistoryDocument> existingBySiteCode = siteHistoryRepository
-                .findAllByBrandAndGranularityAndBucket(Brand.SOLIS, candidate.granularity(), candidate.bucket())
+                .findAllByBrandAndGranularityAndBucket(
+                        Brand.SOLIS,
+                        candidate.granularity(),
+                        candidate.bucket()
+                )
                 .stream()
                 .filter(document -> document.getSiteCode() != null)
                 .collect(Collectors.toMap(
@@ -192,32 +209,61 @@ public class SolisBatchHistoryBackfillService {
 
         return sites.stream()
                 .filter(site -> isBucketAfterSiteStart(site, candidate, today))
-                .filter(site -> isDocumentDue(existingBySiteCode.get(site.getSiteCode()), candidate))
+                .filter(site -> isDocumentDue(site, existingBySiteCode.get(site.getSiteCode()), candidate))
                 .toList();
     }
 
-    private boolean isBucketAfterSiteStart(SiteDocument site, HistoryCandidate candidate, LocalDate referenceDate) {
-        LocalDate firstDate = firstHistoryDate(site, referenceDate);
+    private boolean isBucketAfterSiteStart(
+            SiteDocument site,
+            HistoryCandidate candidate,
+            LocalDate referenceDate
+    ) {
+        if (candidate.granularity() == HistoryGranularity.MONTH) {
+            return HistoryBackfillCompletenessSupport.isMonthBucketAfterSiteStart(
+                    site,
+                    candidate.bucket(),
+                    referenceDate,
+                    maxLookbackMonths,
+                    TUNIS_ZONE
+            );
+        }
+
+        LocalDate firstDate = HistoryBackfillCompletenessSupport.firstHistoryDate(
+                site,
+                referenceDate,
+                maxLookbackMonths,
+                TUNIS_ZONE
+        );
+
         LocalDate bucketEnd = bucketEndDate(candidate);
         return bucketEnd == null || !bucketEnd.isBefore(firstDate);
     }
 
-    private boolean isDocumentDue(SiteHistoryDocument document, HistoryCandidate candidate) {
+    private boolean isDocumentDue(
+            SiteDocument site,
+            SiteHistoryDocument document,
+            HistoryCandidate candidate
+    ) {
+        if (candidate.granularity() == HistoryGranularity.MONTH) {
+            return isMonthBucketDueWithLog(site, document, candidate.bucket());
+        }
+
         if (document == null) {
             return true;
         }
 
         boolean hasPoints = document.getPoints() != null && !document.getPoints().isEmpty();
+
         if (hasPoints) {
             if (!candidate.current()) {
                 return false;
             }
 
-            long refreshMs = refreshIntervalMs(candidate.granularity());
             if (document.getLastSyncAt() == null) {
                 return true;
             }
 
+            long refreshMs = refreshIntervalMs(candidate.granularity());
             return document.getLastSyncAt().isBefore(Instant.now().minusMillis(refreshMs));
         }
 
@@ -225,8 +271,109 @@ public class SolisBatchHistoryBackfillService {
             return true;
         }
 
-        Instant retryAfter = document.getLastSyncAt().plusMillis(Math.max(60_000L, emptyHistoryRetryMs));
+        Instant retryAfter = document.getLastSyncAt()
+                .plusMillis(Math.max(60_000L, emptyHistoryRetryMs));
+
         return !Instant.now().isBefore(retryAfter);
+    }
+
+    private boolean isMonthBucketDueWithLog(
+            SiteDocument site,
+            SiteHistoryDocument document,
+            String bucket
+    ) {
+        LocalDate today = LocalDate.now(TUNIS_ZONE);
+
+        HistoryBackfillCompletenessSupport.MonthCompleteness completeness =
+                HistoryBackfillCompletenessSupport.inspectMonth(
+                        site,
+                        document,
+                        bucket,
+                        today,
+                        maxLookbackMonths,
+                        TUNIS_ZONE
+                );
+
+        boolean due = HistoryBackfillCompletenessSupport.isMonthHistoryDue(
+                site,
+                document,
+                bucket,
+                today,
+                maxLookbackMonths,
+                emptyHistoryRetryMs,
+                incompleteMonthRefreshMs,
+                invalidValueMonthRefreshMs,
+                currentMonthRefreshMs,
+                monthFinalizationGraceHours,
+                TUNIS_ZONE
+        );
+
+        if (due) {
+            log.info(
+                    "Solis MONTH bucket due site={} bucket={} status={} collected={}/{} present={} missingDays={} zeroOrNullDays={} missingOrInvalid={} expectedRange={}..{} lastSyncAt={} reason={}",
+                    site.getSiteCode(),
+                    bucket,
+                    HistoryBackfillCompletenessSupport.monthStatusLabel(completeness),
+                    completeness.collectedDays(),
+                    completeness.expectedDays(),
+                    completeness.presentDays(),
+                    completeness.missingDays(),
+                    completeness.invalidValueDays(),
+                    completeness.missingOrInvalidDays(),
+                    completeness.expectedStart(),
+                    completeness.expectedEnd(),
+                    document != null ? document.getLastSyncAt() : null,
+                    monthDueReason(document, completeness, bucket)
+            );
+        } else if (completeness.expectedDays() > 0) {
+            log.debug(
+                    "Solis MONTH bucket OK site={} bucket={} collected={}/{} present={} missingDays={} zeroOrNullDays={} expectedRange={}..{} lastSyncAt={}",
+                    site.getSiteCode(),
+                    bucket,
+                    completeness.collectedDays(),
+                    completeness.expectedDays(),
+                    completeness.presentDays(),
+                    completeness.missingDays(),
+                    completeness.invalidValueDays(),
+                    completeness.expectedStart(),
+                    completeness.expectedEnd(),
+                    document != null ? document.getLastSyncAt() : null
+            );
+        }
+
+        return due;
+    }
+
+    private String monthDueReason(
+            SiteHistoryDocument document,
+            HistoryBackfillCompletenessSupport.MonthCompleteness completeness,
+            String bucket
+    ) {
+        if (document == null) {
+            return "MISSING_BUCKET";
+        }
+
+        if (document.getPoints() == null || document.getPoints().isEmpty()) {
+            return "EMPTY_BUCKET";
+        }
+
+        if (completeness.missingDays() > 0 && completeness.invalidValueDays() > 0) {
+            return "MISSING_DAYS_AND_ZERO_OR_NULL_VALUES";
+        }
+
+        if (completeness.missingDays() > 0) {
+            return "MISSING_DAYS";
+        }
+
+        if (completeness.invalidValueDays() > 0) {
+            return "ZERO_OR_NULL_VALUE_DAYS";
+        }
+
+        if (YearMonth.now(TUNIS_ZONE).toString().equals(bucket)) {
+            return "CURRENT_MONTH_REFRESH";
+        }
+
+        return "COLLECTED_TOO_EARLY_OR_STALE";
     }
 
     private long refreshIntervalMs(HistoryGranularity granularity) {
@@ -254,22 +401,30 @@ public class SolisBatchHistoryBackfillService {
                 .map(SiteDocument::getSiteCode)
                 .filter(code -> code != null && !code.isBlank())
                 .distinct()
-                .limit(100)
+                .limit(1)
                 .toList();
 
         if (siteCodes.isEmpty()) {
             return;
         }
 
-        Map<String, List<HistoryPointDto>> pointsBySite = solisMonitoringProvider.getBatchHistory(
-                siteCodes,
-                candidate.type(),
-                candidate.bucket()
-        );
+        Map<String, List<HistoryPointDto>> pointsBySite =
+                solisMonitoringProvider.getBatchHistory(
+                        siteCodes,
+                        candidate.type(),
+                        candidate.bucket()
+                );
 
         for (SiteDocument site : sites) {
-            List<HistoryPointDto> points = pointsBySite.get(site.getSiteCode());
-            saveHistory(site, candidate.granularity(), candidate.bucket(), points != null ? points : List.of());
+            List<HistoryPointDto> loadedPoints =
+                    pointsBySite.getOrDefault(site.getSiteCode(), List.of());
+
+            saveHistory(
+                    site,
+                    candidate.granularity(),
+                    candidate.bucket(),
+                    loadedPoints
+            );
         }
 
         log.info(
@@ -288,6 +443,7 @@ public class SolisBatchHistoryBackfillService {
             List<HistoryPointDto> loadedPoints
     ) {
         Instant now = Instant.now();
+
         SiteHistoryDocument existing = siteHistoryRepository
                 .findByBrandAndSiteCodeAndGranularityAndBucket(
                         Brand.SOLIS,
@@ -297,10 +453,16 @@ public class SolisBatchHistoryBackfillService {
                 )
                 .orElse(null);
 
-        List<HistoryPointDto> pointsToSave = loadedPoints != null ? loadedPoints : List.of();
-        if (pointsToSave.isEmpty() && existing != null && existing.getPoints() != null && !existing.getPoints().isEmpty()) {
-            pointsToSave = existing.getPoints();
-        }
+        List<HistoryPointDto> mergedPoints =
+                HistoryBackfillCompletenessSupport.mergeHistoryPoints(
+                        existing != null ? existing.getPoints() : List.of(),
+                        loadedPoints,
+                        granularity,
+                        TUNIS_ZONE
+                );
+
+        List<HistoryPointDto> pointsToSave =
+                clampMonthPoints(site, granularity, bucket, mergedPoints);
 
         SiteHistoryDocument document = siteMongoMapper.toSiteHistoryDocument(
                 Brand.SOLIS,
@@ -315,74 +477,81 @@ public class SolisBatchHistoryBackfillService {
         document.setProviderAccountKey(site.getProviderAccountKey());
         document.setProviderAccountGroup(site.getProviderAccountGroup());
 
+        if (loadedPoints != null && !loadedPoints.isEmpty()) {
+            HistoryCollectionStateSupport.markSuccessful(document, now);
+        }
         siteHistoryRepository.save(document);
+
+        logMonthSaveStatus(
+                site,
+                granularity,
+                bucket,
+                loadedPoints,
+                pointsToSave,
+                document
+        );
     }
 
-    private LocalDate firstHistoryDate(SiteDocument site, LocalDate referenceDate) {
-        LocalDate maxLookbackStart = YearMonth.from(referenceDate)
-                .minusMonths(Math.max(1, maxLookbackMonths) - 1L)
-                .atDay(1);
+    private List<HistoryPointDto> clampMonthPoints(
+            SiteDocument site,
+            HistoryGranularity granularity,
+            String bucket,
+            List<HistoryPointDto> points
+    ) {
+        List<HistoryPointDto> safe = points != null ? points : List.of();
 
-        LocalDate productionStartDate = site.getSwapDate() != null
-                ? site.getSwapDate()
-                : parseDate(site.getGridConnectionDate());
-
-        if (productionStartDate == null) {
-            return maxLookbackStart;
+        if (granularity != HistoryGranularity.MONTH) {
+            return safe;
         }
 
-        if (productionStartDate.isBefore(maxLookbackStart)) {
-            return maxLookbackStart;
-        }
-
-        return productionStartDate;
+        return HistoryBackfillCompletenessSupport.clampMonthPointsToExpectedWindow(
+                site,
+                bucket,
+                safe,
+                LocalDate.now(TUNIS_ZONE),
+                maxLookbackMonths,
+                TUNIS_ZONE
+        );
     }
 
-    private LocalDate parseDate(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
+    private void logMonthSaveStatus(
+            SiteDocument site,
+            HistoryGranularity granularity,
+            String bucket,
+            List<HistoryPointDto> loadedPoints,
+            List<HistoryPointDto> savedPoints,
+            SiteHistoryDocument document
+    ) {
+        if (granularity != HistoryGranularity.MONTH) {
+            return;
         }
 
-        String value = raw.trim();
+        HistoryBackfillCompletenessSupport.MonthCompleteness completeness =
+                HistoryBackfillCompletenessSupport.inspectMonth(
+                        site,
+                        document,
+                        bucket,
+                        LocalDate.now(TUNIS_ZONE),
+                        maxLookbackMonths,
+                        TUNIS_ZONE
+                );
 
-        if (value.matches("^\\d{10,13}$")) {
-            long epoch = Long.parseLong(value);
-            long epochMillis = epoch < 1_000_000_000_000L ? epoch * 1000 : epoch;
-            return Instant.ofEpochMilli(epochMillis).atZone(TUNIS_ZONE).toLocalDate();
-        }
-
-        try {
-            return LocalDate.parse(value);
-        } catch (DateTimeParseException ignored) {
-            // Try display format below.
-        }
-
-        try {
-            return LocalDate.parse(value, DISPLAY_DATE_FORMATTER);
-        } catch (DateTimeParseException ignored) {
-            // Try text cleanup below.
-        }
-
-        String firstTenChars = value.length() >= 10 ? value.substring(0, 10) : value;
-
-        try {
-            return LocalDate.parse(firstTenChars);
-        } catch (DateTimeParseException ignored) {
-            // Try slash format below.
-        }
-
-        try {
-            return LocalDate.parse(firstTenChars, DateTimeFormatter.ofPattern("yyyy/MM/dd"));
-        } catch (DateTimeParseException ignored) {
-            // Try year-month below.
-        }
-
-        String normalized = value.toUpperCase(Locale.ROOT).replace('/', '-');
-        if (normalized.matches("^\\d{4}-\\d{2}$")) {
-            return YearMonth.parse(normalized).atDay(1);
-        }
-
-        return null;
+        log.info(
+                "Solis MONTH bucket saved site={} bucket={} loadedPoints={} savedPoints={} status={} collected={}/{} present={} missingDays={} zeroOrNullDays={} missingOrInvalid={} expectedRange={}..{}",
+                site.getSiteCode(),
+                bucket,
+                loadedPoints == null ? 0 : loadedPoints.size(),
+                savedPoints == null ? 0 : savedPoints.size(),
+                HistoryBackfillCompletenessSupport.monthStatusLabel(completeness),
+                completeness.collectedDays(),
+                completeness.expectedDays(),
+                completeness.presentDays(),
+                completeness.missingDays(),
+                completeness.invalidValueDays(),
+                completeness.missingOrInvalidDays(),
+                completeness.expectedStart(),
+                completeness.expectedEnd()
+        );
     }
 
     private record HistoryCandidate(

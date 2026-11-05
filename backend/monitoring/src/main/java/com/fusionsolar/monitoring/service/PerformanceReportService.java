@@ -136,7 +136,13 @@ public class PerformanceReportService {
         }
 
         return sites.stream()
-                .map(site -> toRow(site, range, yesterday, productionsBySiteKey.get(siteKey(site))))
+                .map(site -> toRow(
+                        site,
+                        range,
+                        yesterday,
+                        productionsBySiteKey.get(siteKey(site)),
+                        siteProductions
+                ))
                 .toList();
     }
 
@@ -148,7 +154,8 @@ public class PerformanceReportService {
             SiteDocument site,
             ReportRange range,
             LocalDate yesterday,
-            ProductionEstimationService.DailySiteProduction siteProduction
+            ProductionEstimationService.DailySiteProduction siteProduction,
+            List<ProductionEstimationService.DailySiteProduction> allSiteProductions
     ) {
         String governorate = productionEstimationService.governorateForSite(site);
         String zone = productionEstimationService.zoneForGovernorate(governorate);
@@ -172,7 +179,13 @@ public class PerformanceReportService {
                 ? null
                 : round2(productionEstimationService.theoreticalYieldPerKwc(zone, productionStart, productionEnd) * installedPowerKw);
 
-        ActualComputation actual = computeActualKwh(siteProduction, productionStart, productionEnd, yesterday);
+        ActualComputation actual = computeActualKwh(
+                siteProduction,
+                allSiteProductions,
+                productionStart,
+                productionEnd,
+                yesterday
+        );
         Double actualKwh = actual.finalKwh();
 
         boolean canCompare = expectedKwh != null && actualKwh != null;
@@ -230,6 +243,7 @@ public class PerformanceReportService {
 
     private ActualComputation computeActualKwh(
             ProductionEstimationService.DailySiteProduction siteProduction,
+            List<ProductionEstimationService.DailySiteProduction> allSiteProductions,
             LocalDate productionStart,
             LocalDate productionEnd,
             LocalDate yesterday
@@ -244,7 +258,12 @@ public class PerformanceReportService {
         }
 
         ProductionEstimationService.DisplayedProductionComputation displayed = productionEstimationService
-                .computeDisplayedProduction(siteProduction, productionStart, safeProductionEnd);
+                .computeDisplayedProduction(
+                        siteProduction,
+                        allSiteProductions,
+                        productionStart,
+                        safeProductionEnd
+                );
 
         return new ActualComputation(
                 round2(displayed.realKwh()),

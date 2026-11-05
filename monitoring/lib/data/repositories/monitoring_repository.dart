@@ -19,6 +19,14 @@ class MonitoringRepository {
 
   final ApiClient _apiClient;
 
+  Future<Map<String, String>> getLatestCollectedPeriods({required String brand, required String siteCode}) async {
+    final data = await _apiClient.get(
+      '/api/brands/${Uri.encodeComponent(brand)}/sites/${Uri.encodeComponent(siteCode)}/history/latest-periods',
+    );
+    if (data is! Map) return {};
+    return data.map((key, value) => MapEntry(key.toString(), value.toString()));
+  }
+
   Future<List<String>> getBrands() async {
     final data = await _apiClient.get('/api/brands');
     if (data is! List) return const [];

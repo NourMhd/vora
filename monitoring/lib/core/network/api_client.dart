@@ -48,10 +48,10 @@ class ApiClient {
     );
   }
 
-  static const String baseUrl = String.fromEnvironment(
-    'VORA_API_BASE_URL',
-    defaultValue: 'http://localhost:9090',
-  );
+  static const String _configuredBaseUrl = String.fromEnvironment('VORA_API_BASE_URL');
+  static String get baseUrl => _configuredBaseUrl.isNotEmpty
+      ? _configuredBaseUrl
+      : (kIsWeb ? Uri.base.origin : 'http://localhost:9090');
 
   late final Dio _dio;
   String? _sessionCookie;
@@ -120,6 +120,15 @@ class ApiClient {
     final response = await _dio.put<dynamic>(
       path,
       data: data,
+      options: _options(),
+    );
+    return _read(response);
+  }
+
+  Future<dynamic> delete(String path, {Map<String, dynamic>? queryParameters}) async {
+    final response = await _dio.delete<dynamic>(
+      path,
+      queryParameters: queryParameters,
       options: _options(),
     );
     return _read(response);

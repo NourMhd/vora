@@ -15,6 +15,11 @@ import java.util.Optional;
 public class SitesSummarySyncSchedulerService {
 
     private final MonitoringSitesSyncRegistry monitoringSitesSyncRegistry;
+    private final com.fusionsolar.monitoring.persistence.repositories.SyncRunRepository syncRuns;
+    private volatile long nextInventoryAt;
+    @Value("${app.huawei-sync.inventory-fixed-delay-ms:10800000}")
+    private long inventoryIntervalMs;
+
     private final HuaweiDeviceSyncService huaweiDeviceSyncService;
     private final Optional<SolisDeviceSyncService> solisDeviceSyncService;
     private final Optional<SolisHistoryWarmupService> solisHistoryWarmupService;
@@ -24,23 +29,34 @@ public class SitesSummarySyncSchedulerService {
     @Value("${app.solis-sync.history-warmup-enabled:false}")
     private boolean solisHistoryWarmupEnabled;
 
-    @Scheduled(cron = "${app.huawei-sync.summary-cron}", zone = "Africa/Tunis")
+    @Scheduled(initialDelayString = "${app.huawei-sync.inventory-initial-delay-ms:30000}", fixedDelayString = "${app.huawei-sync.inventory-check-ms:60000}", scheduler = "inventoryScheduler")
     public void scheduledSyncAllBrandsSitesSummary() {
-        for (Brand brand : monitoringSitesSyncRegistry.getAvailableBrands()) {
-            try {
-                monitoringSitesSyncRegistry
-                        .getRequiredSyncService(brand)
-                        .syncSitesSummary();
-            } catch (Exception e) {
-                log.warn("Sites summary sync failed for brand {}: {}", brand, e.getMessage());
-            }
+        if (System.currentTimeMillis() < nextInventoryAt) return;
+        try {
+            syncBrand(Brand.HUAWEI);
+        } finally {
+            boolean complete = syncRuns.findTopByBrandAndTypeOrderByStartedAtDesc(Brand.HUAWEI, "SITES_SUMMARY")
+                    .map(run -> run.getStatus() == com.fusionsolar.monitoring.persistence.enums.SyncStatus.SUCCESS)
+                    .orElse(false);
+            nextInventoryAt = System.currentTimeMillis() + (complete ? Math.max(300000L, inventoryIntervalMs) : 300000L);
         }
+    }
+
+    @Scheduled(cron = "${app.solis-sync.summary-cron:0 */5 * * * *}", zone = "Africa/Tunis", scheduler = "stateScheduler")
+    public void scheduledSolisSitesSummary() {
+        if (monitoringSitesSyncRegistry.getAvailableBrands().contains(Brand.SOLIS)) syncBrand(Brand.SOLIS);
+    }
+
+    private void syncBrand(Brand brand) {
+        try { monitoringSitesSyncRegistry.getRequiredSyncService(brand).syncSitesSummary(); }
+        catch (Exception e) { log.warn("Sites summary sync failed for brand {}: {}", brand, e.getMessage()); }
     }
 
 
     @Scheduled(
             initialDelayString = "${app.growatt-sync.summary-initial-delay-ms:15000}",
-            fixedDelayString = "${app.growatt-sync.summary-fixed-delay-ms:600000}"
+            fixedDelayString = "${app.growatt-sync.summary-fixed-delay-ms:600000}",
+            scheduler = "stateScheduler"
     )
     public void scheduledGrowattSitesSummarySync() {
         growattSyncService.ifPresent(service -> {

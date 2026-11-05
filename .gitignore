@@ -1,0 +1,4 @@
+
+# Private runtime configuration
+**/application-private.yml
+**/set-env.bat

@@ -31,6 +31,7 @@ class AlarmsPage extends GetView<AlarmsController> {
         return RefreshIndicator(
           onRefresh: controller.refreshData,
           child: CustomScrollView(
+            controller: controller.scrollController,
             slivers: [
               _AlarmsHeader(controller: controller),
               SliverPadding(
@@ -210,6 +211,7 @@ class _SectionKpiOverview extends StatelessWidget {
             ratio: ratio,
             icon: _typeIcon(section.type),
             accent: _typeAccent(section.type),
+            onTap: () => controller.jumpToSectionType(section.type),
           );
         },
       ),
@@ -220,6 +222,7 @@ class _SectionKpiOverview extends StatelessWidget {
         ratio: totalWithHistory <= 0 ? 0.0 : controller.historyCount / totalWithHistory,
         icon: Icons.history_rounded,
         accent: AppColors.deepTeal,
+        onTap: controller.jumpToHistory,
       ),
     ];
 
@@ -275,6 +278,7 @@ class _SectionKpiCard extends StatelessWidget {
     required this.ratio,
     required this.icon,
     required this.accent,
+    required this.onTap,
   });
 
   final String title;
@@ -283,81 +287,92 @@ class _SectionKpiCard extends StatelessWidget {
   final double ratio;
   final IconData icon;
   final Color accent;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final safeRatio = ratio.clamp(0.0, 1.0);
     final percent = safeRatio * 100;
 
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AppColors.white,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppColors.borderGray),
-      ),
-      child: Row(
-        children: [
-          _MiniPieChart(
-            ratio: safeRatio,
-            color: accent,
-            centerIcon: icon,
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: AppColors.white,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: accent.withOpacity(0.22)),
+            ),
+            child: Row(
               children: [
-                Text(
-                  title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: AppColors.midnightNavy,
-                    fontWeight: FontWeight.w900,
-                  ),
+                _MiniPieChart(
+                  ratio: safeRatio,
+                  color: accent,
+                  centerIcon: icon,
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  subtitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: AppColors.mutedText,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Text(
-                      count.toString(),
-                      style: TextStyle(
-                        color: accent,
-                        fontSize: 24,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        '${Formatters.decimal(percent, decimals: 1)}%',
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          color: AppColors.slateGraphite,
-                          fontSize: 12,
+                          color: AppColors.midnightNavy,
                           fontWeight: FontWeight.w900,
                         ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppColors.mutedText,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Text(
+                            count.toString(),
+                            style: TextStyle(
+                              color: accent,
+                              fontSize: 24,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              '${Formatters.decimal(percent, decimals: 1)}%',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: AppColors.slateGraphite,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -523,7 +538,7 @@ class _ReactiveAlarmSectionCard extends StatelessWidget {
       final page = controller.pageFor(pageKey);
 
       return Padding(
-        key: ValueKey('alarm-section-${section.type}-$page-${section.alarms.length}'),
+        key: controller.sectionAnchorKey(section.type),
         padding: const EdgeInsets.only(bottom: 18),
         child: _AlarmSectionCard(
           controller: controller,
@@ -550,9 +565,11 @@ class _ReactiveAlarmHistoryCard extends StatelessWidget {
       final page = controller.pageFor(pageKey);
       final historyCount = controller.history.length;
 
-      return _AlarmHistoryCard(
-        key: ValueKey('alarm-history-$page-$historyCount'),
-        controller: controller,
+      return KeyedSubtree(
+        key: controller.historyAnchorKey,
+        child: _AlarmHistoryCard(
+          controller: controller,
+        ),
       );
     });
   }
@@ -742,7 +759,7 @@ class _AlarmTile extends StatelessWidget {
 }
 
 class _AlarmHistoryCard extends StatelessWidget {
-  const _AlarmHistoryCard({required this.controller, required ValueKey<String> key});
+  const _AlarmHistoryCard({super.key, required this.controller});
 
   final AlarmsController controller;
 

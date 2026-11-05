@@ -35,6 +35,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/ai-report/gemini-health").permitAll()
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                         .requestMatchers("/api/auth/me").authenticated()
+                        .requestMatchers("/api/planning/**").hasAuthority("ROLE_FIELD_PLANNING")
                         .requestMatchers("/api/**").authenticated()
                         .anyRequest().denyAll()
                 );

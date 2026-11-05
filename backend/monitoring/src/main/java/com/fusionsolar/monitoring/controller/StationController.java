@@ -85,6 +85,19 @@ public class StationController {
         return dto;
     }
 
+    @org.springframework.web.bind.annotation.PostMapping("/brands/{brand}/sites/{siteCode}/history/collect")
+    @org.springframework.web.bind.annotation.ResponseStatus(org.springframework.http.HttpStatus.ACCEPTED)
+    public java.util.Map<String, String> collectHistory(@PathVariable String brand,
+            @PathVariable String siteCode, @RequestParam String type, @RequestParam String value) {
+        stationService.requestHistoryCollection(parseBrand(brand), siteCode, type, value);
+        return java.util.Map.of("status", "QUEUED");
+    }
+
+    @GetMapping("/brands/{brand}/sites/{siteCode}/history/latest-periods")
+    public java.util.Map<String, String> latestCollectedPeriods(@PathVariable String brand, @PathVariable String siteCode) {
+        return stationService.getLatestCollectedPeriods(parseBrand(brand), siteCode);
+    }
+
     @GetMapping("/brands/{brand}/sites/{siteCode}/history")
     public List<HistoryPointDto> getHistory(
             @PathVariable String brand,

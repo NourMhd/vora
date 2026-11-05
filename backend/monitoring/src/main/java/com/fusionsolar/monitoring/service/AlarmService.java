@@ -387,7 +387,7 @@ public class AlarmService {
                 continue;
             }
 
-            Optional<Double> dayHistoryTotal = realKwhFromDayHistory(site, cursor);
+            Optional<Double> dayHistoryTotal = realKwhFromMonthHistory(site, cursor);
             if (dayHistoryTotal.isPresent()) {
                 return Optional.of(new ProductionDayResult(
                         cursor,
@@ -401,23 +401,22 @@ public class AlarmService {
         return Optional.empty();
     }
 
-    private Optional<Double> realKwhFromDayHistory(SiteDocument site, LocalDate day) {
+    private Optional<Double> realKwhFromMonthHistory(SiteDocument site, LocalDate day) {
         if (site == null || day == null) {
             return Optional.empty();
         }
 
+        String monthBucket = day.toString().substring(0, 7);
+
         Optional<SiteHistoryDocument> history = findHistory(
                 site,
-                HistoryGranularity.DAY,
-                day.toString()
+                HistoryGranularity.MONTH,
+                monthBucket
         );
 
         if (history.isEmpty() || history.get().getPoints() == null || history.get().getPoints().isEmpty()) {
             return Optional.empty();
         }
-
-        double total = 0.0;
-        boolean hasValue = false;
 
         for (HistoryPointDto point : history.get().getPoints()) {
             if (point == null || point.getCollectTime() == null) {
@@ -430,13 +429,12 @@ public class AlarmService {
             }
 
             Double value = productionEstimationService.normalizeHistoryValue(point.getValue());
-            if (value != null) {
-                total += value;
-                hasValue = true;
+            if (value != null && value > ProductionEstimationService.EPSILON) {
+                return Optional.of(round2(value));
             }
         }
 
-        return hasValue ? Optional.of(round2(total)) : Optional.empty();
+        return Optional.empty();
     }
 
     private ProductionEstimationService.DailySiteProduction productionMetadata(SiteDocument site) {
