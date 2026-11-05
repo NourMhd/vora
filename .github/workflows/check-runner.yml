@@ -1,0 +1,62 @@
+name: Verification runner Vora
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verification:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64, vora-production]
+    timeout-minutes: 5
+
+    steps:
+      - name: Verifier le compte Windows
+        shell: powershell
+        run: whoami
+
+      - name: Tester les droits sur les dossiers
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($folder in @(
+            'C:\vora\backend',
+            'C:\vora\frontend',
+            'C:\vora\backups'
+          )) {
+            $probe = Join-Path $folder ("runner-check-" + [guid]::NewGuid() + ".tmp")
+            try {
+              Set-Content -LiteralPath $probe -Value 'verification'
+              if ((Get-Content -LiteralPath $probe) -ne 'verification') {
+                throw "Lecture impossible : $folder"
+              }
+              Write-Host "Lecture et ecriture OK : $folder"
+            } finally {
+              if (Test-Path -LiteralPath $probe) {
+                Remove-Item -LiteralPath $probe -Force
+              }
+            }
+          }
+
+      - name: Verifier le service et les fichiers
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $service = Get-Service -Name backendvora
+          Write-Host "Etat backendvora : $($service.Status)"
+          if ($service.Status -ne 'Running') {
+            throw 'Le backend est arrete'
+          }
+          foreach ($file in @(
+            'C:\vora\backend\app.jar',
+            'C:\vora\backend\application-private.yml',
+            'C:\vora\frontend\index.html',
+            'C:\mongodb-tools\bin\mongodump.exe'
+          )) {
+            if (-not (Test-Path -LiteralPath $file)) {
+              throw "Fichier absent : $file"
+            }
+            Write-Host "Present : $file"
+          }
