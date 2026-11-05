@@ -9,4 +9,5 @@ public class AppAuthResponse {
     private boolean authenticated;
     private String username;
     private String scope;
+    private boolean planningAccess;
 }

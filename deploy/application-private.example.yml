@@ -1,0 +1,75 @@
+providers:
+  huawei:
+    enabled: true
+    base-url: https://intl.fusionsolar.huawei.com
+    username: api.api.api.api.api.api
+    password: A_RENSEIGNER
+    accounts:
+    - key: itscom-api-01
+      group: itscom
+      username: api.api.api.api.api.api
+      password: A_RENSEIGNER
+    - key: itscom-api-02
+      group: itscom
+      username: api.api
+      password: A_RENSEIGNER
+    - key: itscom-api-03
+      group: itscom
+      username: api.api.api
+      password: A_RENSEIGNER
+    - key: itscom-api-04
+      group: itscom
+      username: api.api.api.api
+      password: A_RENSEIGNER
+    - key: itscom-api-05
+      group: itscom
+      username: api.api.api.api.api
+      password: A_RENSEIGNER
+    - key: global-engineering-api-01
+      group: global-engineering
+      username: client1
+      password: A_RENSEIGNER
+    - key: global-engineering-api-02
+      group: global-engineering
+      username: client2
+      password: A_RENSEIGNER
+    - key: global-engineering-api-03
+      group: global-engineering
+      username: client3
+      password: A_RENSEIGNER
+    - key: global-engineering-api-04
+      group: global-engineering
+      username: client4
+      password: A_RENSEIGNER
+    - key: global-engineering-api-05
+      group: global-engineering
+      username: client5
+      password: A_RENSEIGNER
+  solis:
+    enabled: true
+    base-url: ${SOLIS_BASE_URL:https://www.soliscloud.com:13333}
+    key-id: A_RENSEIGNER
+    key-secret: A_RENSEIGNER
+  growatt:
+    enabled: true
+    base-url: https://openapi.growatt.com
+    accounts:
+    - key: growatt-1
+      group: ITS
+      token: A_RENSEIGNER
+    - key: growatt-2
+      group: COMPTE2
+      token: A_RENSEIGNER
+app:
+  auth:
+    username: vora.orange
+    password: A_RENSEIGNER
+    orange-local-username: vora.orange.local
+    orange-local-password: A_RENSEIGNER
+    ooredoo-username: vora.ooredoo
+    ooredoo-password: A_RENSEIGNER
+    independent-username: client
+    independent-password: A_RENSEIGNER
+  ai-report:
+    gemini:
+      api-key: A_RENSEIGNER

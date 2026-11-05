@@ -24,7 +24,7 @@ class PerformanceController extends GetxController {
 
   final searchQuery = ''.obs;
   final selectedResult = 'ALL'.obs; // ALL / BONUS / MALUS / N/A
-  final selectedStatus = 'HEALTHY'.obs; // HEALTHY / FAULTY / ALL
+  final selectedStatus = 'HEALTHY'.obs; // HEALTHY / FAULTY / DISCONNECTED / ALL
   final selectedZone = 'ALL'.obs; // ALL / Zone A / Zone B / Zone C / UNKNOWN
   final selectedGovernorate = 'ALL'.obs; // ALL / ARI / SFA / ... / UNKNOWN
   final selectedPlantType = 'ALL'.obs; // ALL / RT / GF / UNKNOWN
@@ -47,6 +47,7 @@ class PerformanceController extends GetxController {
   Map<String, String> get statusFilterItems => const <String, String>{
         'HEALTHY': 'Healthy',
         'FAULTY': 'Faulty',
+        'DISCONNECTED': 'Offline',
         'ALL': 'Tous',
       };
 
@@ -137,9 +138,15 @@ class PerformanceController extends GetxController {
           (row.governorate ?? '').toLowerCase().contains(query);
 
       final matchesResult = result == 'ALL' || row.bonusMalus.toUpperCase() == result;
+      final hasSwapDate = row.swapDate?.trim().isNotEmpty == true;
+      final isEligibleOffline = normalizedStatus == 'DISCONNECTED' && hasSwapDate;
       final matchesStatus = status == 'ALL'
-          ? normalizedStatus == 'HEALTHY' || normalizedStatus == 'FAULTY'
-          : normalizedStatus == status;
+          ? normalizedStatus == 'HEALTHY' ||
+              normalizedStatus == 'FAULTY' ||
+              isEligibleOffline
+          : status == 'DISCONNECTED'
+              ? isEligibleOffline
+              : normalizedStatus == status;
       final matchesZone = zone == 'ALL' || normalizedZone == zone;
       final matchesGovernorate = governorate == 'ALL' || normalizedGovernorate == governorate;
       final matchesPlantType = plantType == 'ALL' || normalizedPlantType == plantType;
@@ -170,7 +177,10 @@ class PerformanceController extends GetxController {
 
   Iterable<PerformanceReportRow> get comparableRows => rows.where((row) {
         final status = _normalizeStatus(row.siteStatus);
-        return status == 'HEALTHY' || status == 'FAULTY';
+        final hasSwapDate = row.swapDate?.trim().isNotEmpty == true;
+        return status == 'HEALTHY' ||
+            status == 'FAULTY' ||
+            (status == 'DISCONNECTED' && hasSwapDate);
       });
 
   int get bonusCount => comparableRows.where((row) => row.isBonus).length;

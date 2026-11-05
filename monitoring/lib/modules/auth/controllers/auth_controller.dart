@@ -26,12 +26,14 @@ class AuthController extends GetxController {
   final user = Rxn<AuthResponse>();
 
   bool get isLoggedIn => user.value?.authenticated == true;
+  bool get canAccessPlanning => isLoggedIn && user.value?.planningAccess == true;
   String get username => user.value?.username ?? _storage.username ?? 'Technicien';
   String get accessLabel {
     final currentUser = user.value;
     if (currentUser != null) return currentUser.accessLabel;
     final storedScope = _storage.scope;
     if (storedScope == 'INDEPENDENT') return 'CLIENTS INDÉPENDANTS';
+    if (storedScope == 'OOREDOO') return 'TECHNICIEN OOREDOO';
     if (storedScope == 'PROJECT') return 'TECHNICIEN PROJET';
     return 'ACCÈS PLATEFORME';
   }

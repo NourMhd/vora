@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -17,110 +18,183 @@ class ProductionEstimationServiceTests {
     private final ProductionEstimationService service = new ProductionEstimationService();
 
     @Test
-    void keepsEveryPositiveRealValueAsMonitored() {
-        ProductionEstimationService.DailySiteProduction site = production(Map.of(
-                LocalDate.of(2025, 3, 3), 1.25
-        ));
+    void keepsPositiveRealValueAsMonitored() {
+        LocalDate day = LocalDate.of(2025, 3, 3);
+        var site = production("ARI_0001", "ARI", "Zone A", 10.0, day.minusDays(2), Map.of(day, 12.5));
 
-        ProductionEstimationService.DailyProductionDecision decision = service.decideDailyProduction(
-                site,
-                LocalDate.of(2025, 3, 3),
-                service.monthlyRealAverages(site)
-        );
+        var decision = service.decideDailyProduction(site, List.of(site), day);
 
         assertThat(decision.monitored()).isTrue();
         assertThat(decision.estimated()).isFalse();
-        assertThat(decision.effectiveValue()).isEqualTo(1.25);
+        assertThat(decision.effectiveValue()).isEqualTo(12.5);
     }
 
     @Test
-    void estimatesZeroOrAbsentDayWithMonthlyRuleWhenMonthHasPositiveValues() {
-        Map<LocalDate, Double> values = new HashMap<>();
-        values.put(LocalDate.of(2025, 3, 1), 10.0);
-        values.put(LocalDate.of(2025, 3, 2), 12.0);
-        values.put(LocalDate.of(2025, 3, 3), 0.0);
-        values.put(LocalDate.of(2025, 3, 5), 8.0);
-        ProductionEstimationService.DailySiteProduction site = production(values);
+    void usesOnlySiteAverageFromThirtyReliableDays() {
+        LocalDate missingDay = LocalDate.of(2025, 1, 31);
+        Map<LocalDate, Double> values = consecutiveValues(LocalDate.of(2025, 1, 1), 30, 25.0);
+        var target = production("ARI_0001", "ARI", "Zone A", 10.0,
+                LocalDate.of(2025, 1, 1), values);
 
-        Map<YearMonth, Double> monthlyAverages = service.monthlyRealAverages(site);
-        Double theoretical = service.theoreticalMonthlyAverageKwh(site, YearMonth.of(2025, 3));
+        var decision = service.decideDailyProduction(target, List.of(target), missingDay);
 
-        ProductionEstimationService.DailyProductionDecision zeroDecision = service.decideDailyProduction(
-                site,
-                LocalDate.of(2025, 3, 3),
-                monthlyAverages
-        );
-        ProductionEstimationService.DailyProductionDecision absentDecision = service.decideDailyProduction(
-                site,
-                LocalDate.of(2025, 3, 4),
-                monthlyAverages
-        );
-
-        assertThat(monthlyAverages.get(YearMonth.of(2025, 3))).isEqualTo(10.0);
-        assertThat(zeroDecision.estimated()).isTrue();
-        assertThat(zeroDecision.effectiveValue()).isEqualTo(service.round2((10.0 + theoretical) / 2.0));
-        assertThat(absentDecision.estimated()).isTrue();
-        assertThat(absentDecision.effectiveValue()).isEqualTo(service.round2((10.0 + theoretical) / 2.0));
+        assertThat(decision.effectiveValue()).isEqualTo(25.0);
+        assertThat(decision.status()).contains("SITE_HISTORY_ESTIMATED");
     }
 
     @Test
-    void doesNotEstimateWhenMonthHasNoPositiveRealValue() {
-        ProductionEstimationService.DailySiteProduction site = production(Map.of(
-                LocalDate.of(2025, 3, 3), 0.0
-        ));
+    void weightsLimitedSiteHistoryWithReliablePeerFromSameGovernorate() {
+        LocalDate missingDay = LocalDate.of(2025, 3, 25);
+        var target = production("ARI_0001", "ARI", "Zone A", 10.0,
+                LocalDate.of(2025, 3, 1), consecutiveValues(LocalDate.of(2025, 3, 1), 10, 20.0));
+        var peer = production("ARI_0002", "ARI", "Zone A", 5.0,
+                LocalDate.of(2025, 2, 1), consecutiveValues(LocalDate.of(2025, 3, 1), 20, 12.0));
 
-        ProductionEstimationService.DailyProductionDecision decision = service.decideDailyProduction(
-                site,
-                LocalDate.of(2025, 3, 3),
-                service.monthlyRealAverages(site)
-        );
+        var decision = service.decideDailyProduction(target, List.of(target, peer), missingDay);
 
-        assertThat(decision.estimated()).isFalse();
-        assertThat(decision.effectiveValue()).isNull();
-        assertThat(decision.status()).contains("NO_REAL_AVERAGE");
+        double confidence = 10.0 / 30.0;
+        double peerScaled = (12.0 / 5.0) * 10.0;
+        double expected = service.round2(confidence * 20.0 + (1.0 - confidence) * peerScaled);
+        assertThat(decision.effectiveValue()).isEqualTo(expected);
+        assertThat(decision.status()).contains("REGIONAL_WEIGHTED_ESTIMATED");
     }
 
     @Test
-    void computesDisplayedProductionWithMonthlyRealAndTheoreticalAverage() {
-        ProductionEstimationService.DailySiteProduction site = production(Map.of(
-                LocalDate.of(2025, 3, 1), 10.0,
-                LocalDate.of(2025, 3, 2), 12.0,
-                LocalDate.of(2025, 3, 3), 0.0,
-                LocalDate.of(2025, 3, 5), 8.0
-        ));
+    void usesReliableRegionalReferenceWhenTargetHasNoRealDay() {
+        LocalDate day = LocalDate.of(2025, 3, 25);
+        var target = production("ARI_0001", "ARI", "Zone A", 10.0,
+                LocalDate.of(2025, 3, 1), Map.of());
+        var peer = production("ARI_0002", "ARI", "Zone A", 5.0,
+                LocalDate.of(2025, 2, 1), consecutiveValues(LocalDate.of(2025, 3, 1), 20, 12.0));
 
-        ProductionEstimationService.DisplayedProductionComputation result = service.computeDisplayedProduction(
-                site,
-                LocalDate.of(2025, 3, 1),
-                LocalDate.of(2025, 3, 5)
-        );
+        var decision = service.decideDailyProduction(target, List.of(target, peer), day);
 
-        double theoretical = 0.0;
-        for (int day = 1; day <= 5; day++) {
-            theoretical += service.theoreticalDailyKwh(site, LocalDate.of(2025, 3, day));
+        assertThat(decision.effectiveValue()).isEqualTo(24.0);
+        assertThat(decision.status()).contains("REGIONAL_REFERENCE_ESTIMATED");
+    }
+
+    @Test
+    void fallsBackToDailyTheoreticalValueWithoutReliableRegionalReference() {
+        LocalDate day = LocalDate.of(2025, 3, 25);
+        var target = production("ARI_0001", "ARI", "Zone A", 10.0,
+                LocalDate.of(2025, 3, 1), Map.of());
+
+        var decision = service.decideDailyProduction(target, List.of(target), day);
+
+        assertThat(decision.effectiveValue()).isEqualTo(service.theoreticalDailyKwh(target, day));
+        assertThat(decision.status()).contains("THEORETICAL_FALLBACK_ESTIMATED");
+    }
+
+    @Test
+    void ignoresPeerFromAnotherGovernorate() {
+        LocalDate day = LocalDate.of(2025, 3, 25);
+        var target = production("BAR_0001", "BAR", "Zone A", 10.0,
+                LocalDate.of(2025, 3, 1), Map.of());
+        var otherGovernorate = production("MED_0001", "MED", "Zone C", 5.0,
+                LocalDate.of(2025, 2, 1), consecutiveValues(LocalDate.of(2025, 3, 1), 20, 50.0));
+
+        var decision = service.decideDailyProduction(target, List.of(target, otherGovernorate), day);
+
+        assertThat(decision.effectiveValue()).isEqualTo(service.theoreticalDailyKwh(target, day));
+        assertThat(decision.status()).contains("THEORETICAL_FALLBACK_ESTIMATED");
+    }
+
+    @Test
+    void ignoresPeerWithFewerThanTwentyReliableDays() {
+        LocalDate day = LocalDate.of(2025, 3, 25);
+        var target = production("ARI_0001", "ARI", "Zone A", 10.0,
+                LocalDate.of(2025, 3, 1), Map.of());
+        var insufficientPeer = production("ARI_0002", "ARI", "Zone A", 5.0,
+                LocalDate.of(2025, 2, 1), consecutiveValues(LocalDate.of(2025, 3, 1), 19, 12.0));
+
+        var decision = service.decideDailyProduction(target, List.of(target, insufficientPeer), day);
+
+        assertThat(decision.effectiveValue()).isEqualTo(service.theoreticalDailyKwh(target, day));
+        assertThat(decision.status()).contains("THEORETICAL_FALLBACK_ESTIMATED");
+    }
+
+    @Test
+    void capsExceptionalPeerAtOneHundredTwentyPercentOfTheoreticalAverage() {
+        LocalDate day = LocalDate.of(2025, 3, 25);
+        var target = production("ARI_0001", "ARI", "Zone A", 10.0,
+                LocalDate.of(2025, 3, 1), Map.of());
+        var exceptionalPeer = production("ARI_0002", "ARI", "Zone A", 5.0,
+                LocalDate.of(2025, 2, 1), consecutiveValues(LocalDate.of(2025, 3, 1), 20, 100.0));
+
+        var decision = service.decideDailyProduction(target, List.of(target, exceptionalPeer), day);
+
+        YearMonth month = YearMonth.of(2025, 3);
+        double theoreticalMonthAverage = 0.0;
+        for (int currentDay = 1; currentDay <= month.lengthOfMonth(); currentDay++) {
+            theoreticalMonthAverage += service.theoreticalDailyKwh(target, month.atDay(currentDay));
         }
-        double estimationDay = ((30.0 / 3.0) + (theoretical / 5.0)) / 2.0;
-
-        assertThat(result.realKwh()).isEqualTo(30.0);
-        assertThat(result.estimatedDays()).isEqualTo(2);
-        assertThat(result.estimatedKwh()).isEqualTo(service.round2(estimationDay * 2));
-        assertThat(result.displayedKwh()).isEqualTo(service.round2(30.0 + service.round2(estimationDay * 2)));
+        theoreticalMonthAverage /= month.lengthOfMonth();
+        assertThat(decision.effectiveValue()).isEqualTo(
+                service.round2(theoreticalMonthAverage * ProductionEstimationService.MAX_PEER_TO_THEORETICAL_RATIO)
+        );
     }
 
-    private ProductionEstimationService.DailySiteProduction production(Map<LocalDate, Double> values) {
+    @Test
+    void computesDisplayedProductionDayByDayWithRegionalWeighting() {
+        LocalDate start = LocalDate.of(2025, 3, 1);
+        LocalDate end = LocalDate.of(2025, 3, 12);
+        var target = production("ARI_0001", "ARI", "Zone A", 10.0, start,
+                consecutiveValues(start, 10, 20.0));
+        var peer = production("ARI_0002", "ARI", "Zone A", 5.0, start.minusMonths(1),
+                consecutiveValues(start, 20, 12.0));
+
+        var result = service.computeDisplayedProduction(target, List.of(target, peer), start, end);
+
+        double confidence = 10.0 / 30.0;
+        double estimatedPerDay = confidence * 20.0 + (1.0 - confidence) * 24.0;
+        assertThat(result.realKwh()).isEqualTo(200.0);
+        assertThat(result.monitoredDays()).isEqualTo(10);
+        assertThat(result.estimatedDays()).isEqualTo(2);
+        assertThat(result.estimatedKwh()).isEqualTo(service.round2(estimatedPerDay * 2));
+        assertThat(result.displayedKwh()).isEqualTo(service.round2(200.0 + estimatedPerDay * 2));
+    }
+
+    @Test
+    void keepsResultUnavailableWhenInstalledPowerIsMissing() {
+        LocalDate day = LocalDate.of(2025, 3, 1);
+        var target = production("ARI_0001", "ARI", "Zone A", 0.0, day, Map.of(day, 20.0));
+
+        var result = service.computeDisplayedProduction(target, List.of(target), day, day.plusDays(2));
+
+        assertThat(result.realKwh()).isEqualTo(20.0);
+        assertThat(result.estimatedKwh()).isZero();
+        assertThat(result.displayedKwh()).isNull();
+    }
+
+    private Map<LocalDate, Double> consecutiveValues(LocalDate start, int days, double dailyKwh) {
+        Map<LocalDate, Double> values = new HashMap<>();
+        for (int i = 0; i < days; i++) {
+            values.put(start.plusDays(i), dailyKwh);
+        }
+        return values;
+    }
+
+    private ProductionEstimationService.DailySiteProduction production(
+            String siteCode,
+            String governorate,
+            String zone,
+            double installedPowerKw,
+            LocalDate swapDate,
+            Map<LocalDate, Double> values
+    ) {
         SiteDocument document = new SiteDocument();
         document.setBrand(Brand.HUAWEI);
-        document.setSiteCode("ARI_0001");
-        document.setSiteName("ARI test");
-        document.setInstalledPowerKw(10.0);
-        document.setSwapDate(LocalDate.of(2025, 3, 1));
+        document.setSiteCode(siteCode);
+        document.setSiteName(governorate + " test");
+        document.setInstalledPowerKw(installedPowerKw);
+        document.setSwapDate(swapDate);
 
         return new ProductionEstimationService.DailySiteProduction(
                 document,
                 document.getSiteCode(),
                 document.getSiteName(),
-                "ARI",
-                "Zone A",
+                governorate,
+                zone,
                 document.getInstalledPowerKw(),
                 document.getSwapDate(),
                 values,

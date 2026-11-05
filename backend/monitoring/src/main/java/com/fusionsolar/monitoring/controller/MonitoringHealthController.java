@@ -58,6 +58,8 @@ public class MonitoringHealthController {
     @GetMapping("/sync/status")
     public List<SyncStatusDto> syncStatus() {
         return List.of(
+                toDto(syncRunRepository.findTopByBrandAndTypeOrderByStartedAtDesc(Brand.HUAWEI, "STATES").orElse(null)),
+                toDto(syncRunRepository.findTopByBrandAndTypeOrderByStartedAtDesc(Brand.GROWATT, "SITES_SUMMARY").orElse(null)),
                 toDto(syncRunRepository.findTopByBrandAndTypeOrderByStartedAtDesc(Brand.HUAWEI, "SITES_SUMMARY").orElse(null)),
                 toDto(syncRunRepository.findTopByBrandAndTypeOrderByStartedAtDesc(Brand.SOLIS, "SITES_SUMMARY").orElse(null)),
                 toDto(syncRunRepository.findTopByBrandAndTypeOrderByStartedAtDesc(Brand.HUAWEI, "HUAWEI_DEVICES").orElse(null)),

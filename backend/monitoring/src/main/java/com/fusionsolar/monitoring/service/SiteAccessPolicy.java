@@ -9,6 +9,8 @@ import java.util.Locale;
 
 public final class SiteAccessPolicy {
 
+    private static final String OOREDOO_PROVIDER_GROUP = "global-engineering";
+
     public static final List<String> PROJECT_SITE_PREFIXES = List.of(
             "ARI_",
             "BAR_",
@@ -67,11 +69,19 @@ public final class SiteAccessPolicy {
             return false;
         }
 
-        if (scope == SiteAccessScope.INDEPENDENT) {
-            return !isProjectSite(site);
-        }
+        boolean projectSite = isProjectSite(site);
+        boolean ooredooProvider = isOoredooProvider(site);
 
-        return isProjectSite(site);
+        return switch (scope) {
+            case PROJECT -> projectSite && !ooredooProvider;
+            case OOREDOO -> projectSite && ooredooProvider;
+            case INDEPENDENT -> !projectSite;
+        };
+    }
+
+    private static boolean isOoredooProvider(SiteDocument site) {
+        return site.getProviderAccountGroup() != null
+                && OOREDOO_PROVIDER_GROUP.equalsIgnoreCase(site.getProviderAccountGroup().trim());
     }
 
     public static String projectPrefixesLabel() {

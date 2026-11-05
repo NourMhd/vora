@@ -20,6 +20,7 @@ import com.fusionsolar.monitoring.dto.StationRealKpiResponse;
 import com.fusionsolar.monitoring.persistence.enums.Brand;
 import com.fusionsolar.monitoring.service.huawei.HuaweiAccountDirectory;
 import com.fusionsolar.monitoring.service.huawei.HuaweiAccountDirectory.HuaweiAccount;
+import com.fusionsolar.monitoring.service.huawei.HuaweiApiDeferredException;
 import com.fusionsolar.monitoring.util.DateTimeUtils;
 import com.fusionsolar.monitoring.util.SiteNameNormalizer;
 import lombok.RequiredArgsConstructor;
@@ -37,8 +38,6 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 @Slf4j
 @Service
@@ -62,7 +61,6 @@ public class HuaweiLiveStationService {
 
     private static final long STATION_PAGE_DELAY_MS = 300;
     private static final long STATION_KPI_BATCH_DELAY_MS = 1200;
-    private static final long GROUP_SUMMARY_MAX_WAIT_MILLIS = 6 * 60 * 1000 + 30 * 1000;
 
     private final FusionSolarStationClient stationClient;
     private final HuaweiAccountDirectory huaweiAccountDirectory;
@@ -70,6 +68,12 @@ public class HuaweiLiveStationService {
     private volatile CachedDashboardSummary cachedDashboard;
     private volatile CachedStations cachedStations;
     private volatile CachedSitesSummary cachedSitesSummary;
+
+    private final Map<String, String> inventoryOwners = new ConcurrentHashMap<>();
+
+    public String inventoryAccountForSite(String group, String code, String fallback) {
+        return inventoryOwners.getOrDefault(group + "|" + code, fallback);
+    }
 
     private final Map<String, CachedStations> cachedStationsByAccount = new ConcurrentHashMap<>();
     private final Map<String, CachedSitesSummary> cachedSitesSummaryByAccount = new ConcurrentHashMap<>();
@@ -80,12 +84,17 @@ public class HuaweiLiveStationService {
     public record AccountSitesSummary(
             String accountKey,
             String accountGroup,
-            List<SiteSummaryDto> sites
+            List<SiteSummaryDto> sites,
+            boolean complete
     ) {
+        public AccountSitesSummary(String accountKey, String accountGroup, List<SiteSummaryDto> sites) {
+            this(accountKey, accountGroup, sites, true);
+        }
     }
 
     public List<AccountSitesSummary> getSitesSummaryByAccountGroup() {
         Map<String, List<HuaweiAccount>> accountsByGroup = huaweiAccountDirectory.getEnabledAccountsByGroup();
+        if (accountsByGroup.isEmpty()) throw new IllegalStateException("No enabled Huawei source configured");
         List<CompletableFuture<AccountSitesSummary>> pending = new ArrayList<>();
 
         for (Map.Entry<String, List<HuaweiAccount>> entry : accountsByGroup.entrySet()) {
@@ -96,100 +105,40 @@ public class HuaweiLiveStationService {
         }
 
         List<AccountSitesSummary> result = new ArrayList<>();
-        long deadline = System.currentTimeMillis() + GROUP_SUMMARY_MAX_WAIT_MILLIS;
-
-        while (!pending.isEmpty()) {
-            long remainingMs = deadline - System.currentTimeMillis();
-            if (remainingMs <= 0) {
-                break;
-            }
-
+        // Background sync waits for each group; provider cooldowns must not truncate inventories.
+        for (CompletableFuture<AccountSitesSummary> future : pending) {
             try {
-                CompletableFuture<?> anyCompleted = CompletableFuture.anyOf(
-                        pending.toArray(new CompletableFuture[0])
-                );
-                anyCompleted.get(remainingMs, TimeUnit.MILLISECONDS);
+                AccountSitesSummary summary = future.get();
+                if (summary != null) result.add(summary);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                log.warn("Huawei group sites summary loading interrupted: {}", e.getMessage());
-                break;
-            } catch (TimeoutException e) {
-                break;
+                throw new IllegalStateException("Huawei inventory interrupted", e);
             } catch (ExecutionException e) {
-                Throwable cause = e.getCause() != null ? e.getCause() : e;
-                log.warn("Huawei group sites summary loading failed: {}", cause.getMessage());
+                log.warn("Huawei group inventory failed: {}", e.getMessage());
             }
-
-            List<CompletableFuture<AccountSitesSummary>> stillPending = new ArrayList<>();
-            for (CompletableFuture<AccountSitesSummary> future : pending) {
-                if (!future.isDone()) {
-                    stillPending.add(future);
-                    continue;
-                }
-
-                try {
-                    AccountSitesSummary summary = future.getNow(null);
-                    if (summary != null) {
-                        result.add(summary);
-                        log.info(
-                                "Huawei sites summary loaded group={} account={} sites={}",
-                                summary.accountGroup(),
-                                summary.accountKey(),
-                                summary.sites() != null ? summary.sites().size() : 0
-                        );
-                    }
-                } catch (Exception e) {
-                    log.warn("Huawei group sites summary loading failed: {}", e.getMessage());
-                }
-            }
-            pending = stillPending;
-        }
-
-        if (!pending.isEmpty()) {
-            log.warn(
-                    "Huawei sites summary returning {} completed group(s) without waiting for {} slower FusionSolar group(s).",
-                    result.size(),
-                    pending.size()
-            );
         }
 
         return result;
     }
 
     private AccountSitesSummary loadSitesSummaryForGroup(String group, List<HuaweiAccount> accounts) {
-        boolean loaded = false;
-
+        Map<String, SiteSummaryDto> union = new LinkedHashMap<>();
+        for (HuaweiAccount account : accounts) cachedStationsByAccount.remove(account.key());
+        boolean complete = true;
         for (HuaweiAccount account : accounts) {
             try {
-                List<SiteSummaryDto> sites = getSitesSummaryForMongoSync(account.key());
-                loaded = true;
-                return new AccountSitesSummary(account.key(), group, sites);
-            } catch (Exception e) {
-                log.warn(
-                        "Unable to load Huawei sites summary for group={} account={}: {}",
-                        group,
-                        account.key(),
-                        e.getMessage()
-                );
-
-                // Les identifiants d'un même group appartiennent au même vrai compte FusionSolar.
-                // Si Huawei renvoie un rate limit sur l'un d'eux, essayer immédiatement client2/client3
-                // du même group ne résout rien et bloque le worker pendant le cooldown du group.
-                if (isRateLimit(e)) {
-                    log.warn(
-                            "Huawei group={} is in rate-limit cooldown. Skipping remaining Northbound credentials of the same group.",
-                            group
-                    );
-                    break;
+                for (SiteSummaryDto site : getSitesSummaryForMongoSync(account.key())) {
+                    if (union.putIfAbsent(site.getSiteCode(), site) == null) {
+                        inventoryOwners.put(group + "|" + site.getSiteCode(), account.key());
+                    }
                 }
+            } catch (Exception e) {
+                complete = false;
+                log.warn("Huawei inventory incomplete group={} account={}: {}", group, account.key(), e.getMessage());
+                if (isRateLimit(e) || isDeferred(e) || Thread.currentThread().isInterrupted()) break;
             }
         }
-
-        if (!loaded) {
-            log.warn("No Huawei Northbound credential succeeded for group={}", group);
-        }
-
-        return null;
+        return new AccountSitesSummary(accounts.get(0).key(), group, new ArrayList<>(union.values()), complete);
     }
 
     private boolean isRateLimit(Exception e) {
@@ -205,6 +154,17 @@ public class HuaweiLiveStationService {
                         || normalized.contains("429")) {
                     return true;
                 }
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private boolean isDeferred(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof HuaweiApiDeferredException) {
+                return true;
             }
             current = current.getCause();
         }
@@ -244,9 +204,13 @@ public class HuaweiLiveStationService {
     }
 
     public List<StationItemDto> getStations(String accountKey) {
+        return getStations(accountKey, false);
+    }
+
+    private List<StationItemDto> getStations(String accountKey, boolean fresh) {
         String effectiveAccountKey = effectiveAccountKey(accountKey);
         CachedStations cached = cachedStationsByAccount.get(effectiveAccountKey);
-        if (isStationsCacheValid(cached)) {
+        if (!fresh && isStationsCacheValid(cached)) {
             return cached.getData();
         }
 
@@ -254,21 +218,42 @@ public class HuaweiLiveStationService {
         int pageNo = 1;
 
         while (true) {
-            StationListResponse response = stationClient.getStationsPage(effectiveAccountKey, pageNo);
+            StationListResponse response;
+            try {
+                response = fresh ? stationClient.getStationsPageForSync(effectiveAccountKey, pageNo)
+                        : stationClient.getStationsPage(effectiveAccountKey, pageNo);
+            } catch (HuaweiApiDeferredException e) {
+                if (!fresh && cached != null && cached.getData() != null) {
+                    log.info(
+                            "Huawei station refresh deferred account={} retryAfterMs={}; returning stale cache sites={}",
+                            effectiveAccountKey,
+                            e.getRetryAfterMs(),
+                            cached.getData().size()
+                    );
+                    return cached.getData();
+                }
+                throw e;
+            }
 
-            if (response == null
-                    || response.getData() == null
-                    || response.getData().getList() == null
-                    || response.getData().getList().isEmpty()) {
+            if (response == null || response.getData() == null || response.getData().getList() == null) {
+                throw new IllegalStateException("Huawei station inventory response is malformed");
+            }
+            Integer total = response.getData().getTotal() != null
+                    ? response.getData().getTotal() : response.getData().getTotalCount();
+            if (response.getData().getList().isEmpty()) {
+                if (total != null && allStations.size() < total) {
+                    throw new IllegalStateException("Huawei station inventory truncated before advertised total");
+                }
                 break;
             }
 
             List<StationItemDto> pageStations = response.getData().getList();
             allStations.addAll(pageStations);
 
-            if (pageStations.size() < STATION_PAGE_SIZE) {
+            if (total != null ? allStations.size() >= total : pageStations.size() < STATION_PAGE_SIZE) {
                 break;
             }
+            if (pageNo >= 1000) throw new IllegalStateException("Huawei station pagination limit exceeded");
 
             sleepQuietly(STATION_PAGE_DELAY_MS);
             pageNo++;
@@ -277,7 +262,11 @@ public class HuaweiLiveStationService {
         Map<String, StationItemDto> uniqueByCode = new LinkedHashMap<>();
         for (StationItemDto station : allStations) {
             if (station != null && station.getPlantCode() != null && !station.getPlantCode().isBlank()) {
-                uniqueByCode.putIfAbsent(station.getPlantCode(), station);
+                if (uniqueByCode.putIfAbsent(station.getPlantCode(), station) != null) {
+                    throw new IllegalStateException("Huawei repeated site in paginated inventory");
+                }
+            } else {
+                throw new IllegalStateException("Huawei inventory contains invalid site identity");
             }
         }
 
@@ -499,7 +488,7 @@ public class HuaweiLiveStationService {
 
     public List<SiteSummaryDto> getSitesSummaryForMongoSync(String accountKey) {
         String effectiveAccountKey = effectiveAccountKey(accountKey);
-        List<StationItemDto> stations = getStations(effectiveAccountKey);
+        List<StationItemDto> stations = getStations(effectiveAccountKey, true);
         List<SiteSummaryDto> result = new ArrayList<>();
 
         for (StationItemDto station : stations) {
@@ -510,6 +499,35 @@ public class HuaweiLiveStationService {
         }
 
         log.info("Huawei station list loaded for Mongo sync account={} sites={}", effectiveAccountKey, result.size());
+        return result;
+    }
+
+    public List<SiteSummaryDto> getFreshSitesSummaryForSync(String accountKey) {
+        CachedStations cached = cachedStationsByAccount.get(accountKey);
+        if (cached == null) throw new IllegalStateException("No complete Huawei inventory for " + accountKey);
+        List<StationItemDto> stations = cached.getData();
+        Map<String, StationRealKpiResponse.DataItem> kpis = new LinkedHashMap<>();
+        List<String> codes = stations.stream().map(StationItemDto::getPlantCode).toList();
+        for (List<String> batch : partition(codes, STATION_KPI_BATCH_SIZE)) {
+            try {
+                StationRealKpiResponse response = stationClient.getStationRealKpiForSync(accountKey, batch);
+                if (response == null || response.getData() == null)
+                    throw new IllegalStateException("Huawei KPI response missing");
+                for (StationRealKpiResponse.DataItem item : response.getData()) {
+                    if (item != null) kpis.put(item.getStationCode(), item);
+                }
+            } catch (Exception e) {
+                log.warn("Huawei KPI batch incomplete account={}: {}", accountKey, e.getMessage());
+                if (isRateLimit(e) || isDeferred(e) || Thread.currentThread().isInterrupted()) break;
+            }
+        }
+        List<SiteSummaryDto> result = new ArrayList<>();
+        for (StationItemDto station : stations) {
+            StationRealKpiResponse.DataItem kpi = kpis.get(station.getPlantCode());
+            if (kpi == null || kpi.getDataItemMap() == null || kpi.getDataItemMap().get("real_health_state") == null) continue;
+            SiteSummaryDto summary = buildSiteSummary(station, kpi);
+            if (!"unknown".equals(summary.getStatus())) result.add(summary);
+        }
         return result;
     }
 

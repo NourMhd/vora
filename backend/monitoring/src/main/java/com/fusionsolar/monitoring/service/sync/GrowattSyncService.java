@@ -77,18 +77,22 @@ public class GrowattSyncService implements MonitoringSitesSyncService {
         int savedCount = 0;
         int failedSaveCount = 0;
         int invalidCount = 0;
+        int statesNotRefreshed = 0;
         int deactivatedCount = 0;
         Set<String> receivedSiteCodes = new HashSet<>();
 
         try {
             log.info("Growatt sites sync started");
-            List<SiteSummaryDto> summaries = growattMonitoringProvider.getSitesSummary();
+            GrowattMonitoringProvider.InventorySnapshot inventory = growattMonitoringProvider.getSitesInventory();
+            List<SiteSummaryDto> summaries = inventory.sites();
+            Set<String> unsafeAccounts = new HashSet<>();
             Instant now = Instant.now();
             for (SiteSummaryDto summary : summaries) {
                 if (summary == null || summary.getSiteCode() == null || summary.getSiteCode().isBlank()) {
                     invalidCount++;
                     continue;
                 }
+                if (summary.getStatus() == null || "unknown".equalsIgnoreCase(summary.getStatus()) || summary.getStatus().isBlank()) statesNotRefreshed++;
                 String siteCode = summary.getSiteCode().trim();
                 summary.setSiteCode(siteCode);
                 receivedSiteCodes.add(siteCode);
@@ -100,25 +104,36 @@ public class GrowattSyncService implements MonitoringSitesSyncService {
                     document.setProviderSiteId(siteCode.substring(siteCode.lastIndexOf('_') + 1));
                     document.setActive(true);
                     document.setMissingSince(null);
+                    document.setMissingConfirmations(0);
                     document.setDeletedAt(null);
                     document.setUpdatedAt(now);
                     siteRepository.save(document);
                     savedCount++;
                 } catch (Exception e) {
                     failedSaveCount++;
+                    unsafeAccounts.add(growattMonitoringProvider.inventoryAccountGroup(siteCode));
                     log.warn("Unable to save Growatt site {}: {}", siteCode, e.getMessage());
                 }
             }
-            deactivatedCount = deactivateMissingSites(receivedSiteCodes, now);
+            Set<String> reconciledAccounts = new HashSet<>(inventory.completedAccountGroups());
+            reconciledAccounts.removeAll(unsafeAccounts);
+            deactivatedCount = invalidCount == 0
+                    ? deactivateMissingSites(receivedSiteCodes, reconciledAccounts, now) : 0;
             Map<String, Object> stats = new HashMap<>();
+            stats.put("completedAccounts", inventory.completedAccountGroups());
+            stats.put("failedAccounts", inventory.failedAccountGroups());
+            stats.put("reconciledAccounts", reconciledAccounts);
             stats.put("receivedFromProvider", summaries.size());
             stats.put("validReceived", receivedSiteCodes.size());
             stats.put("invalid", invalidCount);
+            stats.put("statesNotRefreshed", statesNotRefreshed);
             stats.put("saved", savedCount);
             stats.put("failedToSave", failedSaveCount);
             stats.put("deactivated", deactivatedCount);
             log.info("Growatt sites sync completed received={} saved={} invalid={} failed={} deactivated={}", summaries.size(), savedCount, invalidCount, failedSaveCount, deactivatedCount);
-            run.setStatus(failedSaveCount == 0 && invalidCount == 0 ? SyncStatus.SUCCESS : SyncStatus.PARTIAL_SUCCESS);
+            run.setStatus(inventory.completedAccountGroups().isEmpty() ? SyncStatus.FAILED
+                    : failedSaveCount == 0 && invalidCount == 0 && statesNotRefreshed == 0
+                    && inventory.failedAccountGroups().isEmpty() ? SyncStatus.SUCCESS : SyncStatus.PARTIAL_SUCCESS);
             run.setMessage("Growatt sync completed");
             run.setStats(stats);
             run.setFinishedAt(Instant.now());
@@ -132,8 +147,8 @@ public class GrowattSyncService implements MonitoringSitesSyncService {
         }
     }
 
-    private int deactivateMissingSites(Set<String> receivedSiteCodes, Instant now) {
-        if (receivedSiteCodes == null || receivedSiteCodes.isEmpty()) {
+    private int deactivateMissingSites(Set<String> receivedSiteCodes, Set<String> reconciledAccounts, Instant now) {
+        if (receivedSiteCodes == null) {
             log.warn("Growatt missing-site deactivation skipped because provider returned no valid site codes.");
             return 0;
         }
@@ -142,16 +157,18 @@ public class GrowattSyncService implements MonitoringSitesSyncService {
             if (site == null || site.getSiteCode() == null || receivedSiteCodes.contains(site.getSiteCode())) {
                 continue;
             }
+            // Never infer deletion from an inaccessible, disabled or unconfigured account.
+            try {
+                if (!reconciledAccounts.contains(growattMonitoringProvider.inventoryAccountGroup(site.getSiteCode()))) continue;
+            } catch (IllegalArgumentException e) {
+                continue;
+            }
             if (Boolean.FALSE.equals(site.getActive())) {
                 continue;
             }
-            site.setActive(false);
-            site.setSwapDate(null);
-            site.setMissingSince(site.getMissingSince() != null ? site.getMissingSince() : now);
-            site.setDeletedAt(now);
-            site.setUpdatedAt(now);
+            boolean confirmed = SiteMissingPolicy.confirmMissing(site, now);
             siteRepository.save(site);
-            deactivated++;
+            if (confirmed) deactivated++;
         }
         return deactivated;
     }

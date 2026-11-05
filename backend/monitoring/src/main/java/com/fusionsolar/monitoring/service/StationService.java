@@ -16,11 +16,17 @@ import com.fusionsolar.monitoring.persistence.repositories.SiteDeviceRepository;
 import com.fusionsolar.monitoring.persistence.repositories.SiteHistoryRepository;
 import com.fusionsolar.monitoring.persistence.repositories.SiteRepository;
 import com.fusionsolar.monitoring.provider.mapper.SiteMongoMapper;
+import com.fusionsolar.monitoring.service.sync.GrowattHistorySyncService;
+import com.fusionsolar.monitoring.service.sync.HistoryBackfillCompletenessSupport;
+import com.fusionsolar.monitoring.service.sync.HuaweiHistorySyncService;
 import com.fusionsolar.monitoring.service.sync.MonitoringSitesSyncRegistry;
 import com.fusionsolar.monitoring.service.sync.SiteEnergyKpiReconciliationService;
+import com.fusionsolar.monitoring.service.sync.SolisHistorySyncService;
 import com.fusionsolar.monitoring.util.DateTimeUtils;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -43,6 +49,14 @@ public class StationService {
     private final SiteMongoMapper siteMongoMapper;
     private final SiteEnergyKpiReconciliationService siteEnergyKpiReconciliationService;
     private final CurrentSiteAccessService currentSiteAccessService;
+    private final com.fusionsolar.monitoring.service.sync.HistoryDemandQueue historyDemandQueue;
+
+    private final ObjectProvider<HuaweiHistorySyncService> huaweiHistorySyncServiceProvider;
+    private final ObjectProvider<SolisHistorySyncService> solisHistorySyncServiceProvider;
+    private final ObjectProvider<GrowattHistorySyncService> growattHistorySyncServiceProvider;
+
+    @Value("${app.history-backfill.max-lookback-months:120}")
+    private int maxLookbackMonths;
 
     public DashboardSummaryDto getDashboardSummary() {
         List<SiteDocument> sites = siteEnergyKpiReconciliationService
@@ -84,6 +98,7 @@ public class StationService {
     public SiteDetailWithHistoryDto getSiteDetailWithHistory(Brand brand, String siteCode) {
         SiteDocument site = siteEnergyKpiReconciliationService
                 .reconcileCurrentKpisFromCache(getSiteOrThrow(brand, siteCode));
+
         SiteDetailDto detail = siteMongoMapper.toSiteDetailDto(site);
 
         String today = LocalDate.now(TUNIS_ZONE).toString();
@@ -91,9 +106,8 @@ public class StationService {
         String currentYear = String.valueOf(LocalDate.now(TUNIS_ZONE).getYear());
 
         /*
-         * /full doit rester Mongo-only.
-         * Les historiques externes sont chargés par /history en lazy/cache,
-         * sinon Solis 429 et Huawei ACCESS_FREQUENCY_IS_TOO_HIGH reviennent.
+         * /full reste Mongo-only pour éviter les appels fournisseurs lourds au chargement.
+         * Les historiques à la demande sont gérés par getHistory(...).
          */
         return new SiteDetailWithHistoryDto(
                 detail,
@@ -104,26 +118,199 @@ public class StationService {
         );
     }
 
+    public java.util.Map<String, String> getLatestCollectedPeriods(Brand brand, String siteCode) {
+        SiteDocument site = getSiteOrThrow(brand, siteCode);
+        java.util.Map<String, String> periods = new java.util.LinkedHashMap<>();
+        for (String type : List.of("day", "month", "year")) {
+            var histories = siteHistoryRepository.findAllByBrandAndSiteCodeAndGranularity(
+                    brand, siteCode, siteMongoMapper.toGranularity(type));
+            LatestCollectedPeriods.latest(histories, accountGroupOf(site), type, java.time.Instant.now())
+                    .ifPresent(bucket -> periods.put(type, bucket));
+        }
+        return periods;
+    }
+
+    public void requestHistoryCollection(Brand brand, String siteCode, String type, String value) {
+        validateHistoryInput(type, value);
+        SiteDocument site = getSiteOrThrow(brand, siteCode);
+        if (!canLazyFetchHistory(site)) throw new IllegalArgumentException("Unsupported history brand");
+        historyDemandQueue.enqueue(site, type.trim().toLowerCase(java.util.Locale.ROOT), value);
+    }
+
     public List<HistoryPointDto> getHistory(Brand brand, String siteCode, String type, String value) {
         validateHistoryInput(type, value);
 
         SiteDocument site = getSiteOrThrow(brand, siteCode);
         HistoryGranularity granularity = siteMongoMapper.toGranularity(type);
+        String normalizedType = type.trim().toLowerCase();
 
-        /*
-         * Mongo-only: les appels API fournisseur ne doivent plus partir depuis une requête UI.
-         * Le worker HuaweiBatchHistoryBackfillService + SiteHistoryBackfillService remplissent Mongo en arrière-plan.
-         * Résultat: pas de spike quand un utilisateur ouvre une courbe, donc beaucoup moins de 407/429.
-         */
         SiteHistoryDocument cached = findHistory(site, granularity, value).orElse(null);
 
-        if (cached == null || cached.getPoints() == null) {
-            return List.of();
+        if (isUsableCachedHistory(site, cached)) {
+            List<HistoryPointDto> points = cached.getPoints();
+            siteEnergyKpiReconciliationService.reconcileAfterHistoryLoad(site, normalizedType, value, points);
+            return points;
         }
 
-        List<HistoryPointDto> points = cached.getPoints();
-        siteEnergyKpiReconciliationService.reconcileAfterHistoryLoad(site, type, value, points);
-        return points;
+        /*
+         * Objectif métier:
+         * - DAY = courbe horaire kW pour n'importe quel jour choisi.
+         * - MONTH = source KPI journalier historique kWh.
+         * - YEAR = source KPI mensuel historique kWh.
+         *
+         * Donc si Mongo n'a pas encore le bucket demandé, on charge à la demande
+         * depuis la plateforme mère via le backend, jamais depuis Flutter.
+         */
+        if (canLazyFetchHistory(site)) historyDemandQueue.enqueue(site, normalizedType, value);
+        // Serve partial validated data immediately while the queue completes the bucket.
+        if (cached != null && cached.getPoints() != null) {
+            if (site.getBrand() != Brand.SOLIS ||
+                    (!looksLikeSolisUnscopedHistory(cached.getPoints()) && !looksLikeSolisAggregateMonthOrYear(cached)))
+                return cached.getPoints();
+        }
+
+        if (cached != null && cached.getPoints() != null && isUsableCachedHistory(site, cached)) {
+            return cached.getPoints();
+        }
+
+        return List.of();
+    }
+
+    private boolean isUsableCachedHistory(SiteDocument site, SiteHistoryDocument cached) {
+        if (cached == null || cached.getPoints() == null || cached.getPoints().isEmpty()) {
+            return false;
+        }
+
+        if (cached.getGranularity() == HistoryGranularity.MONTH) {
+            HistoryBackfillCompletenessSupport.MonthCompleteness completeness =
+                    HistoryBackfillCompletenessSupport.inspectMonth(
+                            site,
+                            cached,
+                            cached.getBucket(),
+                            LocalDate.now(TUNIS_ZONE),
+                            maxLookbackMonths,
+                            TUNIS_ZONE
+                    );
+
+            if (completeness.expectedDays() > 0 && completeness.missingOrInvalidDays() > 0) {
+                log.info(
+                        "Ignored incomplete MONTH cached history. brand={} site={} bucket={} collected={}/{} missingOrInvalid={} expectedRange={}..{}",
+                        site.getBrand(),
+                        site.getSiteCode(),
+                        cached.getBucket(),
+                        completeness.collectedDays(),
+                        completeness.expectedDays(),
+                        completeness.missingOrInvalidDays(),
+                        completeness.expectedStart(),
+                        completeness.expectedEnd()
+                );
+                return false;
+            }
+        }
+
+        if (site.getBrand() == Brand.SOLIS) {
+            if (looksLikeSolisUnscopedHistory(cached.getPoints())) {
+                log.warn(
+                        "Ignored suspicious Solis cached history. site={} granularity={} bucket={} points={}",
+                        site.getSiteCode(),
+                        cached.getGranularity(),
+                        cached.getBucket(),
+                        cached.getPoints().size()
+                );
+                return false;
+            }
+
+            if (looksLikeSolisAggregateMonthOrYear(cached)) {
+                log.warn(
+                        "Ignored Solis aggregate cached history. site={} granularity={} bucket={} points={}",
+                        site.getSiteCode(),
+                        cached.getGranularity(),
+                        cached.getBucket(),
+                        cached.getPoints().size()
+                );
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private boolean canLazyFetchHistory(SiteDocument site) {
+        return site != null && (
+                site.getBrand() == Brand.HUAWEI ||
+                        site.getBrand() == Brand.SOLIS ||
+                        site.getBrand() == Brand.GROWATT
+        );
+    }
+
+    private List<HistoryPointDto> fetchAndCacheProviderHistory(
+            SiteDocument site,
+            String type,
+            String value,
+            HistoryGranularity granularity,
+            SiteHistoryDocument cached
+    ) {
+        try {
+            return switch (site.getBrand()) {
+                case HUAWEI -> {
+                    HuaweiHistorySyncService huaweiHistorySyncService =
+                            huaweiHistorySyncServiceProvider.getIfAvailable();
+
+                    if (huaweiHistorySyncService == null) {
+                        log.debug("Huawei lazy history skipped because Huawei provider is disabled");
+                        yield safeCachedPoints(cached);
+                    }
+
+                    yield huaweiHistorySyncService.getHistory(site, type, value, true);
+                }
+
+                case SOLIS -> {
+                    SolisHistorySyncService solisHistorySyncService =
+                            solisHistorySyncServiceProvider.getIfAvailable();
+
+                    if (solisHistorySyncService == null) {
+                        log.debug("Solis lazy history skipped because Solis provider is disabled");
+                        yield safeCachedPoints(cached);
+                    }
+
+                    /*
+                     * forceRefresh=true pour recharger même si un ancien document vide existe.
+                     */
+                    yield solisHistorySyncService.getHistory(site, type, value, true);
+                }
+
+                case GROWATT -> {
+                    GrowattHistorySyncService growattHistorySyncService =
+                            growattHistorySyncServiceProvider.getIfAvailable();
+
+                    if (growattHistorySyncService == null) {
+                        log.debug("Growatt lazy history skipped because Growatt provider is disabled");
+                        yield safeCachedPoints(cached);
+                    }
+
+                    yield growattHistorySyncService.getHistory(site, type, value, true);
+                }
+
+                default -> safeCachedPoints(cached);
+            };
+        } catch (Exception e) {
+            log.warn(
+                    "Lazy provider history failed brand={} site={} type={} value={}. Returning cached/empty. Cause={}",
+                    site.getBrand(),
+                    site.getSiteCode(),
+                    type,
+                    value,
+                    e.getMessage()
+            );
+
+            return safeCachedPoints(cached);
+        }
+    }
+
+    private List<HistoryPointDto> safeCachedPoints(SiteHistoryDocument cached) {
+        return cached != null && cached.getPoints() != null
+                ? cached.getPoints()
+                : List.of();
     }
 
     public SiteDevicesResponseDto getSiteDevices(Brand brand, String siteCode) {
@@ -157,9 +344,29 @@ public class StationService {
             HistoryGranularity granularity,
             String bucket
     ) {
-        return findHistory(site, granularity, bucket)
+        List<HistoryPointDto> points = findHistory(site, granularity, bucket)
                 .map(SiteHistoryDocument::getPoints)
                 .orElse(List.of());
+
+        if (site.getBrand() == Brand.SOLIS) {
+            if (looksLikeSolisUnscopedHistory(points)) {
+                log.warn(
+                        "Ignored suspicious Solis cached history from /full. site={} granularity={} bucket={} points={}",
+                        site.getSiteCode(),
+                        granularity,
+                        bucket,
+                        points.size()
+                );
+                return List.of();
+            }
+
+            SiteHistoryDocument document = findHistory(site, granularity, bucket).orElse(null);
+            if (looksLikeSolisAggregateMonthOrYear(document)) {
+                return List.of();
+            }
+        }
+
+        return points;
     }
 
     private Optional<SiteHistoryDocument> findHistory(
@@ -192,9 +399,11 @@ public class StationService {
         if (site != null && site.getProviderAccountGroup() != null && !site.getProviderAccountGroup().isBlank()) {
             return site.getProviderAccountGroup().trim();
         }
+
         if (site != null && site.getProviderAccountKey() != null && !site.getProviderAccountKey().isBlank()) {
             return site.getProviderAccountKey().trim();
         }
+
         return "primary";
     }
 
@@ -211,34 +420,97 @@ public class StationService {
         }
     }
 
+    private boolean looksLikeSolisAggregateMonthOrYear(SiteHistoryDocument cached) {
+        if (cached == null
+                || cached.getGranularity() == null
+                || cached.getBucket() == null
+                || cached.getPoints() == null
+                || cached.getPoints().size() != 1) {
+            return false;
+        }
+
+        if (cached.getGranularity() != HistoryGranularity.MONTH
+                && cached.getGranularity() != HistoryGranularity.YEAR) {
+            return false;
+        }
+
+        try {
+            if (cached.getGranularity() == HistoryGranularity.MONTH) {
+                YearMonth bucket = YearMonth.parse(cached.getBucket());
+                YearMonth current = YearMonth.now(TUNIS_ZONE);
+
+                if (bucket.isBefore(current)) {
+                    return true;
+                }
+
+                return bucket.equals(current) && LocalDate.now(TUNIS_ZONE).getDayOfMonth() > 1;
+            }
+
+            if (cached.getGranularity() == HistoryGranularity.YEAR) {
+                int bucketYear = Integer.parseInt(cached.getBucket());
+                int currentYear = LocalDate.now(TUNIS_ZONE).getYear();
+
+                if (bucketYear < currentYear) {
+                    return true;
+                }
+
+                return bucketYear == currentYear && LocalDate.now(TUNIS_ZONE).getMonthValue() > 1;
+            }
+        } catch (Exception ignored) {
+            return false;
+        }
+
+        return false;
+    }
+
+    private boolean looksLikeSolisUnscopedHistory(List<HistoryPointDto> points) {
+        if (points == null || points.size() <= 1) {
+            return false;
+        }
+
+        long validTimes = points.stream()
+                .map(HistoryPointDto::getCollectTime)
+                .filter(java.util.Objects::nonNull)
+                .count();
+
+        long distinctTimes = points.stream()
+                .map(HistoryPointDto::getCollectTime)
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .count();
+
+        return validTimes > 1 && distinctTimes <= 1;
+    }
+
     private List<SiteDocument> getAllSitesOrBootstrap() {
-       List<SiteDocument> sites = siteRepository.findAllByOrderBySiteNameAsc()
-        .stream()
-        .filter(this::isVisibleSite)
-        .toList();
+        List<SiteDocument> sites = siteRepository.findAllByOrderBySiteNameAsc()
+                .stream()
+                .filter(this::isVisibleSite)
+                .toList();
+
         if (!sites.isEmpty()) {
             return sites;
         }
 
         bootstrapAllBrandsIfNeeded();
 
-       sites = siteRepository.findAllByOrderBySiteNameAsc()
-        .stream()
-        .filter(this::isVisibleSite)
-        .toList();
+        sites = siteRepository.findAllByOrderBySiteNameAsc()
+                .stream()
+                .filter(this::isVisibleSite)
+                .toList();
+
         if (sites.isEmpty()) {
             throw new ResourceNotFoundException("No sites available");
         }
 
         return sites;
     }
-    
 
     private List<SiteDocument> getSitesByBrandOrBootstrap(Brand brand) {
-      List<SiteDocument> sites = siteRepository.findAllByBrandOrderBySiteNameAsc(brand)
-        .stream()
-        .filter(this::isVisibleSite)
-        .toList();
+        List<SiteDocument> sites = siteRepository.findAllByBrandOrderBySiteNameAsc(brand)
+                .stream()
+                .filter(this::isVisibleSite)
+                .toList();
 
         if (!sites.isEmpty()) {
             return sites;
@@ -268,35 +540,35 @@ public class StationService {
         return currentSiteAccessService.canAccess(site);
     }
 
-   private SiteDocument getSiteOrThrow(Brand brand, String siteCode) {
-    SiteDocument site = siteRepository
-            .findByBrandAndSiteCode(brand, siteCode)
-            .orElse(null);
+    private SiteDocument getSiteOrThrow(Brand brand, String siteCode) {
+        SiteDocument site = siteRepository
+                .findByBrandAndSiteCode(brand, siteCode)
+                .orElse(null);
 
-    if (isVisibleSite(site)) {
-        return site;
+        if (isVisibleSite(site)) {
+            return site;
+        }
+
+        try {
+            monitoringSitesSyncRegistry
+                    .getRequiredSyncService(brand)
+                    .bootstrapIfEmpty();
+        } catch (Exception e) {
+            log.warn("Bootstrap failed for brand {}: {}", brand, e.getMessage());
+        }
+
+        site = siteRepository
+                .findByBrandAndSiteCode(brand, siteCode)
+                .orElse(null);
+
+        if (isVisibleSite(site)) {
+            return site;
+        }
+
+        throw new ResourceNotFoundException(
+                "Site not found or inactive: " + siteCode + " for brand: " + brand
+        );
     }
-
-    try {
-        monitoringSitesSyncRegistry
-                .getRequiredSyncService(brand)
-                .bootstrapIfEmpty();
-    } catch (Exception e) {
-        log.warn("Bootstrap failed for brand {}: {}", brand, e.getMessage());
-    }
-
-    site = siteRepository
-            .findByBrandAndSiteCode(brand, siteCode)
-            .orElse(null);
-
-    if (isVisibleSite(site)) {
-        return site;
-    }
-
-    throw new ResourceNotFoundException(
-            "Site not found or inactive: " + siteCode + " for brand: " + brand
-    );
-}
 
     private void bootstrapAllBrandsIfNeeded() {
         for (Brand brand : monitoringSitesSyncRegistry.getAvailableBrands()) {
@@ -310,4 +582,3 @@ public class StationService {
         }
     }
 }
-

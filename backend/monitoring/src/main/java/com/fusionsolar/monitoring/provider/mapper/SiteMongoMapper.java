@@ -84,6 +84,8 @@ public class SiteMongoMapper {
                         existing != null ? existing.getSiteName() : null
                 )))
                 .status(mergeStatus(source.getStatus(), existing))
+                .statusLastSyncAt(toSiteStatus(source.getStatus()) != SiteStatus.UNKNOWN
+                        ? effectiveNow : (existing != null ? existing.getStatusLastSyncAt() : null))
                 .installedPowerKw(mergeNonNegative(
                         source.getInstalledPowerKw(),
                         existing != null ? existing.getInstalledPowerKw() : null
@@ -95,6 +97,9 @@ public class SiteMongoMapper {
                                 existing != null ? existing.getGridConnectionDate() : null
                         )
                 ))
+                .energyLastSyncAt(existing != null ? existing.getEnergyLastSyncAt() : null)
+                .monthEnergyLastSyncAt(existing != null ? existing.getMonthEnergyLastSyncAt() : null)
+                .energyDate(existing != null ? existing.getEnergyDate() : null)
                 .dayEnergyKwh(dayEnergyKwh)
                 .monthEnergyKwh(monthEnergyKwh)
                 .yearEnergyKwh(yearEnergyKwh)
@@ -103,7 +108,12 @@ public class SiteMongoMapper {
                         parseIsoDate(source.getSwapDate()),
                         existing != null ? existing.getSwapDate() : null
                 ))
-                .yearEnergyLastSyncAt(existing != null ? existing.getYearEnergyLastSyncAt() : null)
+                .yearEnergyLastSyncAt(brand == Brand.SOLIS && nonNegativeOrNull(source.getYearEnergyKwh()) != null
+                        ? effectiveNow : (existing != null ? existing.getYearEnergyLastSyncAt() : null))
+                .missingConfirmations(existing != null && existing.getMissingConfirmations() != null ? existing.getMissingConfirmations() : 0)
+                .active(existing != null ? existing.getActive() : true)
+                .missingSince(existing != null ? existing.getMissingSince() : null)
+                .deletedAt(existing != null ? existing.getDeletedAt() : null)
                 .lastSyncAt(effectiveNow)
                 .createdAt(existing != null ? existing.getCreatedAt() : effectiveNow)
                 .updatedAt(effectiveNow)
@@ -423,41 +433,19 @@ public class SiteMongoMapper {
     }
 
     private Double mergeSolisCurrentYearEnergy(
-            Double incomingYearEnergyKwh,
-            Double monthEnergyKwh,
-            Double totalEnergyKwh,
-            SiteDocument existing,
-            Instant now
+            Double incomingYearEnergyKwh, Double monthEnergyKwh, Double totalEnergyKwh,
+            SiteDocument existing, Instant now
     ) {
-        Double existingYearEnergyKwh = existing != null ? existing.getYearEnergyKwh() : null;
-
-        Instant existingYearReference = null;
-        if (existing != null) {
-            existingYearReference = existing.getYearEnergyLastSyncAt() != null
-                    ? existing.getYearEnergyLastSyncAt()
-                    : existing.getLastSyncAt();
-        }
-
-        boolean canReuseExistingYear = existingYearEnergyKwh != null
-                && existingYearReference != null
-                && isSameTunisYear(existingYearReference, now);
-
+        Double incoming = nonNegativeOrNull(incomingYearEnergyKwh);
+        // Only retain a year explicitly acquired by the dedicated year collector.
+        Double previous = existing != null && existing.getYearEnergyLastSyncAt() != null
+                && isSameTunisYear(existing.getYearEnergyLastSyncAt(), now)
+                ? nonNegativeOrNull(existing.getYearEnergyKwh()) : null;
+        double candidate = incoming != null ? incoming : (previous != null ? previous : 0.0);
+        Double month = nonNegativeOrNull(monthEnergyKwh);
+        if (month != null) candidate = Math.max(candidate, month);
         Double total = nonNegativeOrNull(totalEnergyKwh);
-        Double incomingYear = positiveOrNull(incomingYearEnergyKwh);
-        Double existingYear = canReuseExistingYear ? positiveOrNull(existingYearEnergyKwh) : null;
-        Double month = positiveOrNull(monthEnergyKwh);
-
-        Double candidate = firstNonNull(incomingYear, existingYear, month);
-
-        if (total != null) {
-            if (candidate == null) {
-                return round2(total);
-            }
-
-            return round2(Math.min(candidate, total));
-        }
-
-        return round2(candidate != null ? candidate : 0.0);
+        return round2(total != null ? Math.min(candidate, total) : candidate);
     }
 
     private double normalizedYearEnergyKwh(SiteDocument source) {
@@ -469,18 +457,7 @@ public class SiteMongoMapper {
         double year = nullSafeDouble(source.getYearEnergyKwh());
 
         if (source.getBrand() == Brand.SOLIS) {
-            Double total = nonNegativeOrNull(source.getTotalEnergyKwh());
-            double candidate = Math.max(year, month);
-
-            if (total != null) {
-                if (candidate <= EPSILON) {
-                    return round2(total);
-                }
-
-                return round2(Math.min(candidate, total));
-            }
-
-            return round2(candidate);
+            return mergeSolisCurrentYearEnergy(null, source.getMonthEnergyKwh(), source.getTotalEnergyKwh(), source, Instant.now());
         }
 
         return round2(Math.max(year, month));

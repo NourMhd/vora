@@ -64,6 +64,12 @@ public class SiteDocument {
 
     private Double dayEnergyKwh;
 
+    private Instant energyLastSyncAt;
+
+    private Instant monthEnergyLastSyncAt;
+
+    private LocalDate energyDate;
+
     private Double monthEnergyKwh;
 
     private Double yearEnergyKwh;
@@ -85,6 +91,10 @@ public class SiteDocument {
     private Instant updatedAt;
 
     private Boolean active;
+
+    private Integer missingConfirmations;
+
+    private Instant statusLastSyncAt;
 
     private Instant missingSince;
 

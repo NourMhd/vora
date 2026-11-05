@@ -51,10 +51,10 @@ public class SimplePdfReportService {
                     List.of(24, 22, 70),
                     List.of(
                             List.of("Sites", n(kpi.getTotalSites()), "Nombre de sites dans le périmètre filtré"),
-                            List.of("Healthy / Faulty / Offline", n(kpi.getHealthySites()) + " / " + n(kpi.getFaultySites()) + " / " + n(kpi.getDisconnectedSites()), "État global des sites"),
+                            List.of("Sites opérationnels", n(kpi.getHealthySites()), "Sites déclarés opérationnels dans le périmètre"),
                             List.of("Puissance installée", d(kpi.getTotalInstalledPowerKw()) + " kWp", "Somme des puissances installées"),
-                            List.of("Alertes actives", n(kpi.getActiveAlarms()), "Alertes actives au moment de génération"),
-                            List.of("Statut global", safe(kpi.getGlobalStatus()), "Statut calculé par le backend")
+                            List.of("Points à vérifier", n(kpi.getActiveAlarms()), "Synthèse des points de suivi opérationnel"),
+                            List.of("Statut global", safe(kpi.getGlobalStatus()), "Lecture synthétique du périmètre")
                     ));
         }
 
@@ -62,85 +62,62 @@ public class SimplePdfReportService {
         ReportProductionSummaryDto prod = report.getProductionSummary();
         if (prod != null) {
             table(lines,
-                    List.of("Métrique", "kWh / %", "Rôle dans le rapport"),
-                    List.of(24, 18, 74),
+                    List.of("Métrique", "Valeur", "Rôle dans le rapport"),
+                    List.of(24, 22, 70),
                     List.of(
-                            List.of("Production prévue", d(prod.getExpectedKwh()) + " kWh", "Référence théorique sur la période"),
-                            List.of("Réel monitorisé", d(prod.getCapturedKwh()) + " kWh", "Données captées réellement"),
-                            List.of("Estimé", d(prod.getEstimatedKwh()) + " kWh", "Complément pour les jours absents selon les règles métier"),
-                            List.of("Production affichée", d(prod.getDisplayedKwh()) + " kWh", "Réel monitorisé + estimé"),
-                            List.of("Écart", d(prod.getDifferenceKwh()) + " kWh / " + signed(prod.getDifferencePercent()) + " %", "Différence entre affiché et prévu"),
-                            List.of("Bonus / Malus", n(prod.getBonusSites()) + " / " + n(prod.getMalusSites()), "Répartition des sites selon l’écart")
-                    ));
-        }
-
-        section(lines, "4. Qualité des données");
-        ReportDataQualityDto quality = report.getDataQuality();
-        if (quality != null) {
-            table(lines,
-                    List.of("Indicateur", "Valeur", "Interprétation"),
-                    List.of(28, 20, 68),
-                    List.of(
-                            List.of("Jours de production", n(quality.getExpectedProductionDays()), "Jours attendus dans le périmètre"),
-                            List.of("Jours monitorisés", n(quality.getCapturedDays()), "Jours avec données réelles"),
-                            List.of("Jours estimés", n(quality.getEstimatedDays()), "Jours calculés par estimation"),
-                            List.of("Fiabilité", d(quality.getReliabilityPercent()) + " %", "Plus la valeur est élevée, plus le rapport est fiable"),
-                            List.of("Part estimée", d(quality.getEstimatedSharePercent()) + " %", "Part calculée, à surveiller si élevée"),
-                            List.of("Statut qualité", safe(quality.getStatus()), "Qualification globale des données")
+                            List.of("Production totale", d(prod.getDisplayedKwh()) + " kWh", "Valeur finale utilisée dans le rapport")
                     ));
         }
 
         if (!summary) {
-            section(lines, "5. Analyse par zone");
+            section(lines, "4. Analyse par zone");
             List<List<String>> zoneRows = new ArrayList<>();
             if (report.getZoneAnalysis() != null) {
                 for (ReportZoneAnalysisDto row : report.getZoneAnalysis()) {
                     zoneRows.add(List.of(
                             safe(row.getZone()), n(row.getSitesCount()), d(row.getInstalledPowerKw()),
-                            d(row.getExpectedKwh()), d(row.getActualKwh()), d(row.getEstimatedKwh()),
-                            signed(row.getDifferencePercent()) + " %", n(row.getActiveAlarms())
+                            d(row.getActualKwh()), n(row.getActiveAlarms())
                     ));
                 }
             }
-            table(lines, List.of("Zone", "Sites", "kWp", "Prévu", "Affiché", "Estimé", "Écart", "Alertes"),
-                    List.of(12, 6, 9, 12, 12, 10, 10, 8), zoneRows);
+            table(lines, List.of("Zone", "Sites", "kWp", "Production", "Points"),
+                    List.of(18, 8, 12, 18, 10), zoneRows);
 
-            section(lines, "6. Analyse par gouvernorat");
+            section(lines, "5. Analyse par gouvernorat");
             List<List<String>> govRows = new ArrayList<>();
             if (report.getGovernorateAnalysis() != null) {
                 int limit = detailed ? report.getGovernorateAnalysis().size() : 14;
                 report.getGovernorateAnalysis().stream().limit(limit).forEach(row -> govRows.add(List.of(
                         safe(row.getGovernorate()), safe(row.getZone()), n(row.getSitesCount()),
-                        d(row.getInstalledPowerKw()), d(row.getExpectedKwh()), d(row.getActualKwh()),
-                        signed(row.getDifferencePercent()) + " %", n(row.getActiveAlarms())
+                        d(row.getInstalledPowerKw()), d(row.getActualKwh()), n(row.getActiveAlarms())
                 )));
             }
-            table(lines, List.of("Gouv", "Zone", "Sites", "kWp", "Prévu", "Affiché", "Écart", "Alertes"),
-                    List.of(8, 10, 6, 9, 12, 12, 10, 8), govRows);
+            table(lines, List.of("Gouv", "Zone", "Sites", "kWp", "Production", "Points"),
+                    List.of(12, 12, 7, 11, 18, 10), govRows);
         }
 
-        section(lines, summary ? "5. Sites faibles prioritaires" : "7. Sites performants");
+        section(lines, summary ? "4. Sites à suivre" : "6. Sites performants");
         if (!summary) {
             rankingTable(lines, report.getBestSites(), detailed ? 12 : 8);
-            section(lines, "8. Sites faibles / priorités");
+            section(lines, "7. Sites à suivre");
         }
         rankingTable(lines, report.getWorstSites(), summary ? 5 : (detailed ? 12 : 8));
 
         if (!summary) {
-            section(lines, "9. Alertes actives");
+            section(lines, "8. Points de vigilance");
             addAlarms(lines, report.getAlarms(), detailed ? 10 : 6);
         }
 
-        section(lines, summary ? "6. Recommandations techniques" : "10. Recommandations techniques");
+        section(lines, summary ? "5. Recommandations techniques" : "9. Recommandations techniques");
         addRecommendations(lines, report.getRecommendations(), detailed ? 10 : 6);
 
         if (report.getAiNarrative() != null) {
-            section(lines, summary ? "7. Conclusion" : "11. Conclusion");
+            section(lines, summary ? "6. Conclusion" : "10. Conclusion");
             paragraph(lines, report.getAiNarrative().getConclusion());
         }
 
         if (!summary) {
-            section(lines, "12. Annexe technique" + (detailed ? " complète" : " courte"));
+            section(lines, "11. Annexe technique" + (detailed ? " complète" : " courte"));
             technicalAppendix(lines, report.getTechnicalAppendix(), detailed ? Integer.MAX_VALUE : 80);
         }
         return lines;
@@ -148,31 +125,18 @@ public class SimplePdfReportService {
 
     private void addAlarms(List<PdfLine> lines, ReportAlarmSummaryDto alarms, int limit) {
         if (alarms == null || alarms.getActiveCount() == null || alarms.getActiveCount() == 0) {
-            lines.add(text("Aucune alerte active détectée sur le périmètre du rapport."));
+            lines.add(text("Aucun point de vigilance majeur détecté sur le périmètre du rapport."));
             return;
         }
         table(lines,
                 List.of("Indicateur", "Valeur", "Commentaire"),
                 List.of(24, 14, 78),
                 List.of(
-                        List.of("Alertes actives", n(alarms.getActiveCount()), "Total des alertes non résolues"),
-                        List.of("Critiques", n(alarms.getCriticalCount()), "À traiter en priorité"),
-                        List.of("Warning", n(alarms.getWarningCount()), "À surveiller"),
-                        List.of("Historique", n(alarms.getHistoryCount()), "Alertes passées conservées")
+                        List.of("Points à vérifier", n(alarms.getActiveCount()), "Total des points de suivi actifs"),
+                        List.of("Prioritaires", n(alarms.getCriticalCount()), "À contrôler en premier"),
+                        List.of("À suivre", n(alarms.getWarningCount()), "Suivi opérationnel recommandé"),
+                        List.of("Historique", n(alarms.getHistoryCount()), "Événements passés conservés")
                 ));
-        if (alarms.getByType() != null && !alarms.getByType().isEmpty()) {
-            List<List<String>> typeRows = alarms.getByType().stream()
-                    .map(t -> List.of(safe(t.getType()), safe(t.getTitle()), n(t.getCount())))
-                    .toList();
-            table(lines, List.of("Type", "Libellé", "Nombre"), List.of(28, 68, 10), typeRows);
-        }
-        if (alarms.getTopActiveAlarms() != null && !alarms.getTopActiveAlarms().isEmpty()) {
-            List<List<String>> rows = alarms.getTopActiveAlarms().stream().limit(limit)
-                    .map(a -> List.of(safe(a.getSeverity()), safe(a.getSiteName()), safe(a.getGovernorate()), safe(a.getTitle()), safe(a.getMessage())))
-                    .toList();
-            table(lines, List.of("Sévérité", "Site", "Gouv", "Titre", "Message"),
-                    List.of(10, 22, 6, 26, 56), rows);
-        }
     }
 
     private void addRecommendations(List<PdfLine> lines, List<ReportRecommendationDto> recommendations, int limit) {
@@ -182,12 +146,12 @@ public class SimplePdfReportService {
         }
         List<List<String>> rows = recommendations.stream().limit(limit)
                 .map(rec -> List.of(
-                        safe(rec.getPriority()), safe(rec.getTarget()), safe(rec.getIssue()),
+                        safe(rec.getPriority()), safe(rec.getTarget()),
                         safe(rec.getAction()), safe(rec.getJustification())
                 ))
                 .toList();
-        table(lines, List.of("Priorité", "Cible", "Problème", "Action", "Justification"),
-                List.of(10, 22, 30, 48, 42), rows);
+        table(lines, List.of("Priorité", "Cible", "Action", "Justification"),
+                List.of(12, 28, 60, 52), rows);
     }
 
     private void rankingTable(List<PdfLine> lines, List<ReportSiteRankingDto> ranking, int limit) {
@@ -198,12 +162,11 @@ public class SimplePdfReportService {
         List<List<String>> rows = ranking.stream().limit(limit)
                 .map(site -> List.of(
                         safe(site.getSiteName()), safe(site.getGovernorate()), safe(site.getStatus()),
-                        d(site.getExpectedKwh()), d(site.getActualKwh()), d(site.getEstimatedKwh()),
-                        signed(site.getDifferencePercent()) + " %", safe(site.getPriority()), safe(site.getReason())
+                        d(site.getActualKwh()), safe(site.getPriority()), safe(site.getReason())
                 ))
                 .toList();
-        table(lines, List.of("Site", "Gouv", "Statut", "Prévu", "Affiché", "Estimé", "Écart", "Priorité", "Raison"),
-                List.of(22, 6, 12, 10, 10, 10, 9, 10, 34), rows);
+        table(lines, List.of("Site", "Gouv", "Statut", "Production", "Priorité", "Raison"),
+                List.of(28, 10, 13, 15, 12, 52), rows);
     }
 
     private void technicalAppendix(List<PdfLine> lines, List<ReportTechnicalRowDto> appendix, int limit) {
@@ -215,14 +178,12 @@ public class SimplePdfReportService {
                 .map(row -> List.of(
                         safe(row.getSiteName()), safe(row.getBrand()), safe(row.getStatus()),
                         safe(row.getZone()), safe(row.getGovernorate()), d(row.getInstalledPowerKw()),
-                        n(row.getProductionDaysCount()), n(row.getCapturedDaysCount()), n(row.getEstimatedDaysCount()),
-                        d(row.getExpectedKwh()), d(row.getCapturedKwh()), d(row.getEstimatedKwh()),
-                        d(row.getDisplayedKwh()), signed(row.getDifferencePercent()) + " %", safe(row.getDataStatus())
+                        d(row.getDisplayedKwh())
                 ))
                 .toList();
         table(lines,
-                List.of("Site", "Brand", "Statut", "Zone", "Gouv", "kWp", "Prod", "Capt", "Est", "Prévu", "Réel", "Estimé", "Affiché", "Écart", "Data"),
-                List.of(18, 8, 10, 7, 6, 6, 5, 5, 5, 9, 9, 9, 9, 8, 16), rows);
+                List.of("Site", "Brand", "Statut", "Zone", "Gouv", "kWp", "Production"),
+                List.of(26, 8, 11, 10, 8, 8, 16), rows);
         if (appendix.size() > limit) {
             lines.add(text("Annexe limitée à " + limit + " lignes dans ce type de rapport."));
         }

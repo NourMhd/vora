@@ -45,6 +45,7 @@ class AppPages {
       name: AppRoutes.swapDates,
       page: () => const ShellPage(),
     ),
+    GetPage(name: AppRoutes.planning, page: () => const ShellPage()),
     GetPage(
       name: AppRoutes.siteDetails,
       page: () => const SiteDetailsPage(),

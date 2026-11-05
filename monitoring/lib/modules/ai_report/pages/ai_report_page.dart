@@ -194,14 +194,14 @@ class _ReportTypeInfoCard extends StatelessWidget {
         keyName: 'SUMMARY',
         title: 'Résumé',
         pages: '1 à 2 pages',
-        description: 'Vue rapide: KPI essentiels, sites critiques et recommandations courtes.',
+        description: 'Vue rapide: KPI essentiels, sites à suivre et recommandations courtes.',
         icon: Icons.speed_rounded,
       ),
       _ReportTypeInfo(
         keyName: 'STANDARD',
         title: 'Standard',
         pages: '4 à 8 pages',
-        description: 'Rapport mensuel équilibré: production, qualité data, zones, gouvernorats, alertes et annexe courte.',
+        description: 'Rapport mensuel équilibré: production totale, zones, gouvernorats, points de vigilance et annexe courte.',
         icon: Icons.description_rounded,
       ),
     ];
@@ -425,8 +425,8 @@ class _KpiCards extends StatelessWidget {
   Widget build(BuildContext context) {
     final cards = [
       _CardData('Sites', report.globalKpis.totalSites.toString(), Icons.domain_rounded),
-      _CardData('Production affichée', Formatters.energy(report.productionSummary.displayedKwh), Icons.bolt_rounded),
-      _CardData('Alertes actives', report.alarms.activeCount.toString(), Icons.notification_important_rounded),
+      _CardData('Production totale', Formatters.energy(report.productionSummary.displayedKwh), Icons.bolt_rounded),
+      _CardData('Points à vérifier', report.alarms.activeCount.toString(), Icons.fact_check_rounded),
       _CardData('Statut global', report.globalKpis.globalStatus, Icons.health_and_safety_rounded),
     ];
     return LayoutBuilder(
@@ -501,7 +501,7 @@ class _NarrativeCard extends StatelessWidget {
             children: report.aiNarrative.mainFindings.map((item) => _InsightChip(text: item)).toList(),
           ),
           const SizedBox(height: 16),
-          const Text('Analyse risque', style: TextStyle(color: AppColors.midnightNavy, fontWeight: FontWeight.w900)),
+          const Text('Analyse synthétique', style: TextStyle(color: AppColors.midnightNavy, fontWeight: FontWeight.w900)),
           const SizedBox(height: 6),
           Text(report.aiNarrative.riskAnalysis, style: const TextStyle(color: AppColors.mutedText, fontWeight: FontWeight.w700, height: 1.45)),
         ],
@@ -576,7 +576,7 @@ class _SplitSection extends StatelessWidget {
           children: [
             Expanded(child: _RankingCard(title: 'Meilleurs sites', sites: report.bestSites, positive: true)),
             const SizedBox(width: 16),
-            Expanded(child: _RankingCard(title: 'Sites à traiter', sites: report.worstSites, positive: false)),
+            Expanded(child: _RankingCard(title: 'Sites à suivre', sites: report.worstSites, positive: false)),
           ],
         );
       }
@@ -584,7 +584,7 @@ class _SplitSection extends StatelessWidget {
         children: [
           _RankingCard(title: 'Meilleurs sites', sites: report.bestSites, positive: true),
           const SizedBox(height: 16),
-          _RankingCard(title: 'Sites à traiter', sites: report.worstSites, positive: false),
+          _RankingCard(title: 'Sites à suivre', sites: report.worstSites, positive: false),
         ],
       );
     });
@@ -604,7 +604,7 @@ class _RankingCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _SectionTitle(icon: positive ? Icons.emoji_events_rounded : Icons.priority_high_rounded, title: title),
+          _SectionTitle(icon: positive ? Icons.emoji_events_rounded : Icons.visibility_rounded, title: title),
           const SizedBox(height: 12),
           if (sites.isEmpty)
             const Text('Aucune donnée disponible.', style: TextStyle(color: AppColors.mutedText, fontWeight: FontWeight.w700))
@@ -635,9 +635,9 @@ class _SiteLine extends StatelessWidget {
         children: [
           CircleAvatar(
             radius: 18,
-            backgroundColor: (positive ? AppColors.healthy : AppColors.faulty).withOpacity(0.1),
-            foregroundColor: positive ? AppColors.healthy : AppColors.faulty,
-            child: Icon(positive ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded, size: 18),
+            backgroundColor: (positive ? AppColors.healthy : AppColors.deepTeal).withOpacity(0.1),
+            foregroundColor: positive ? AppColors.healthy : AppColors.deepTeal,
+            child: Icon(positive ? Icons.arrow_upward_rounded : Icons.visibility_rounded, size: 18),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -648,7 +648,7 @@ class _SiteLine extends StatelessWidget {
             ]),
           ),
           const SizedBox(width: 10),
-          Text(_signedPercent(site.differencePercent), style: TextStyle(color: positive ? AppColors.healthy : AppColors.faulty, fontWeight: FontWeight.w900)),
+          Text(Formatters.energy(site.actualKwh), style: TextStyle(color: positive ? AppColors.healthy : AppColors.deepTeal, fontWeight: FontWeight.w900)),
         ],
       ),
     );
@@ -724,9 +724,7 @@ class _AppendixCard extends StatelessWidget {
                 DataColumn(label: Text('Site')),
                 DataColumn(label: Text('Gouv')),
                 DataColumn(label: Text('Statut')),
-                DataColumn(label: Text('Prod. affichée')),
-                DataColumn(label: Text('Écart')),
-                DataColumn(label: Text('Data')),
+                DataColumn(label: Text('Production')),
               ],
               rows: report.technicalAppendix.take(12).map((row) {
                 return DataRow(cells: [
@@ -734,8 +732,6 @@ class _AppendixCard extends StatelessWidget {
                   DataCell(Text(row.governorate)),
                   DataCell(Text(row.status)),
                   DataCell(Text(Formatters.energy(row.displayedKwh))),
-                  DataCell(Text(_signedPercent(row.differencePercent))),
-                  DataCell(Text(row.dataStatus)),
                 ]);
               }).toList(),
             ),

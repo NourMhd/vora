@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.index.CompoundIndexDefinition;
 import org.springframework.data.mongodb.core.index.IndexInfo;
+import org.springframework.data.mongodb.core.index.Index;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.core.query.Update;
@@ -18,6 +19,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.time.Duration;
 
 @Slf4j
 @Configuration
@@ -210,6 +212,17 @@ public class MongoIndexMigrationConfig {
                 new Document("brand", 1)
                         .append("siteCode", 1)
         );
+
+        try {
+            mongoTemplate.indexOps("provider_rate_budget").ensureIndex(
+                    new Index()
+                            .on("expiresAt", org.springframework.data.domain.Sort.Direction.ASC)
+                            .expire(Duration.ZERO)
+                            .named("ttl_provider_rate_budget")
+            );
+        } catch (Exception e) {
+            log.warn("Unable to ensure provider rate-budget TTL index: {}", e.getMessage());
+        }
     }
 
     private void ensureNonUniqueIndex(String collectionName, String indexName, Document definition) {

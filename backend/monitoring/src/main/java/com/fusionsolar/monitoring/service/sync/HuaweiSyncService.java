@@ -10,6 +10,7 @@ import com.fusionsolar.monitoring.persistence.repositories.SyncRunRepository;
 import com.fusionsolar.monitoring.provider.huawei.HuaweiMonitoringProvider;
 import com.fusionsolar.monitoring.provider.mapper.SiteMongoMapper;
 import com.fusionsolar.monitoring.service.HuaweiLiveStationService;
+import com.fusionsolar.monitoring.service.huawei.HuaweiAccountDirectory;
 import com.fusionsolar.monitoring.service.HuaweiLiveStationService.AccountSitesSummary;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -34,6 +35,7 @@ public class HuaweiSyncService implements MonitoringSitesSyncService {
     private final SyncRunRepository syncRunRepository;
     private final SiteMongoMapper siteMongoMapper;
     private final HuaweiLiveStationService huaweiLiveStationService;
+    private final HuaweiAccountDirectory accountDirectory;
 
     private final AtomicBoolean summarySyncRunning = new AtomicBoolean(false);
 
@@ -98,6 +100,7 @@ public class HuaweiSyncService implements MonitoringSitesSyncService {
         int invalidCount = 0;
         int failedGroups = 0;
         int liveKpiUpdatedCount = 0;
+        Set<String> stateUpdatedIdentities = new HashSet<>();
 
         try {
             List<AccountSitesSummary> groupedSummaries = huaweiMonitoringProvider.getSitesSummaryByAccountGroup();
@@ -113,13 +116,8 @@ public class HuaweiSyncService implements MonitoringSitesSyncService {
 
                 receivedCount += summaries.size();
 
-                if (summaries.isEmpty()) {
-                    failedGroups++;
-                    log.warn("Huawei account group {} returned no site summary.", accountGroup);
-                    continue;
-                }
-
-                completedGroups.add(accountGroup);
+                if (accountSites.complete()) completedGroups.add(accountGroup);
+                else failedGroups++;
 
                 for (SiteSummaryDto summary : summaries) {
                     if (summary == null || isBlank(summary.getSiteCode())) {
@@ -141,14 +139,15 @@ public class HuaweiSyncService implements MonitoringSitesSyncService {
                                 now
                         );
 
-                        document.setProviderAccountKey(accountKey);
+                        document.setProviderAccountKey(huaweiLiveStationService.inventoryAccountForSite(accountGroup, siteCode, accountKey));
                         document.setProviderAccountGroup(accountGroup);
                         document.setActive(true);
                         document.setMissingSince(null);
+                        document.setMissingConfirmations(0);
                         document.setDeletedAt(null);
                         document.setUpdatedAt(now);
 
-                        siteRepository.save(document);
+                        persistInventory(document, existing);
                         savedCount++;
 
                         if (wasInactive) {
@@ -171,20 +170,24 @@ public class HuaweiSyncService implements MonitoringSitesSyncService {
                     }
                 }
 
-                // Après l'insertion rapide des sites, on enrichit le même groupe avec
-                // /thirdData/getStationRealKpi. Le rate limiter par group attendra
-                // automatiquement le bon délai Huawei avant cet appel.
-                liveKpiUpdatedCount += enrichGroupWithLiveKpis(accountKey, accountGroup);
+                // Live states are collected independently by HuaweiStateSyncService.
+
             }
 
-            deactivatedCount = deactivateMissingSites(
+            deactivatedCount = failedSaveCount == 0 && invalidCount == 0 ? deactivateMissingSites(
                     Brand.HUAWEI,
                     receivedSiteIdentities,
                     completedGroups,
                     now
-            );
+            ) : 0;
 
+            Set<String> missingGroups = new HashSet<>(accountDirectory.getEnabledAccountsByGroup().keySet());
+            missingGroups.removeAll(completedGroups);
+            failedGroups = Math.max(failedGroups, missingGroups.size());
             Map<String, Object> stats = new HashMap<>();
+            stats.put("inventoryOnly", true);
+            stats.put("missingOrIncompleteGroups", missingGroups);
+            stats.put("inventoryOnlyStatesNotRefreshed", Math.max(0, savedCount - liveKpiUpdatedCount));
             stats.put("received", receivedCount);
             stats.put("validReceived", receivedSiteIdentities.size());
             stats.put("completedGroups", completedGroups);
@@ -201,7 +204,7 @@ public class HuaweiSyncService implements MonitoringSitesSyncService {
             boolean fullSuccess = failedSaveCount == 0 && invalidCount == 0 && failedGroups == 0;
 
             run.setStatus(fullSuccess ? SyncStatus.SUCCESS : SyncStatus.PARTIAL_SUCCESS);
-            run.setMessage("Huawei sync completed");
+            run.setMessage("Huawei inventory sync completed; see STATES for live coverage");
             run.setStats(stats);
             run.setFinishedAt(Instant.now());
 
@@ -219,6 +222,7 @@ public class HuaweiSyncService implements MonitoringSitesSyncService {
 
         } catch (Exception e) {
             Map<String, Object> stats = new HashMap<>();
+            stats.put("inventoryOnly", true);
             stats.put("received", receivedCount);
             stats.put("saved", savedCount);
             stats.put("failedToSave", failedSaveCount);
@@ -238,87 +242,37 @@ public class HuaweiSyncService implements MonitoringSitesSyncService {
         }
     }
 
-    private int enrichGroupWithLiveKpis(String accountKey, String accountGroup) {
-        if (isBlank(accountKey) || isBlank(accountGroup)) {
-            return 0;
-        }
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.data.mongodb.core.MongoTemplate mongo;
 
-        try {
-            List<SiteSummaryDto> liveSummaries = huaweiLiveStationService.getSitesSummary(accountKey);
-            int updated = 0;
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.fusionsolar.monitoring.planning.SiteTrackingService siteTracking;
 
-            for (SiteSummaryDto summary : liveSummaries != null ? liveSummaries : List.<SiteSummaryDto>of()) {
-                if (summary == null || isBlank(summary.getSiteCode())) {
-                    continue;
-                }
-
-                String siteCode = summary.getSiteCode().trim();
-
-                if (!hasLiveKpiValues(summary)) {
-                    continue;
-                }
-
-                SiteDocument existing = findExistingSite(accountGroup, siteCode);
-
-                if (existing == null) {
-                    continue;
-                }
-
-                Instant enrichmentTime = Instant.now();
-                SiteDocument document = siteMongoMapper.toSiteDocument(
-                        Brand.HUAWEI,
-                        summary,
-                        existing,
-                        enrichmentTime
-                );
-
-                document.setProviderAccountKey(accountKey);
-                document.setProviderAccountGroup(accountGroup);
-                document.setActive(true);
-                document.setMissingSince(null);
-                document.setDeletedAt(null);
-                document.setUpdatedAt(enrichmentTime);
-
-                siteRepository.save(document);
-                updated++;
-            }
-
-            log.info(
-                    "Huawei live KPI enrichment finished group={} account={} received={} updated={}",
-                    accountGroup,
-                    accountKey,
-                    liveSummaries != null ? liveSummaries.size() : 0,
-                    updated
-            );
-
-            return updated;
-
-        } catch (Exception e) {
-            log.warn(
-                    "Huawei live KPI enrichment skipped group={} account={}: {}",
-                    accountGroup,
-                    accountKey,
-                    e.getMessage()
-            );
-            return 0;
-        }
+    protected void persistInventory(SiteDocument document, SiteDocument existing) {
+        if (existing == null) { siteRepository.insert(document); return; }
+        var update = inventoryUpdate(document);
+        mongo.updateFirst(org.springframework.data.mongodb.core.query.Query.query(
+                org.springframework.data.mongodb.core.query.Criteria.where("_id").is(existing.getId())), update, SiteDocument.class);
+        if (siteTracking != null) siteTracking.captureById(existing.getId(), "HUAWEI_INVENTORY");
     }
 
+    static org.springframework.data.mongodb.core.query.Update inventoryUpdate(SiteDocument d) {
+        return new org.springframework.data.mongodb.core.query.Update()
+                .set("providerAccountKey", d.getProviderAccountKey()).set("providerAccountGroup", d.getProviderAccountGroup())
+                .set("siteCode", d.getSiteCode()).set("providerSiteId", d.getProviderSiteId())
+                .set("siteName", d.getSiteName()).set("installedPowerKw", d.getInstalledPowerKw())
+                .set("gridConnectionDate", d.getGridConnectionDate()).set("active", true)
+                .set("missingSince", null).set("missingConfirmations", 0).set("deletedAt", null)
+                .set("lastSyncAt", d.getLastSyncAt()).set("updatedAt", d.getUpdatedAt());
+    }
 
-    private boolean hasLiveKpiValues(SiteSummaryDto summary) {
-        if (summary == null) {
-            return false;
-        }
-
-        String status = summary.getStatus();
-        if (status != null && !status.isBlank() && !"unknown".equalsIgnoreCase(status.trim())) {
-            return true;
-        }
-
-        return summary.getDayEnergyKwh() != null
-                || summary.getMonthEnergyKwh() != null
-                || summary.getYearEnergyKwh() != null
-                || summary.getTotalEnergyKwh() != null;
+    protected void persistMissing(SiteDocument site) {
+        mongo.updateFirst(org.springframework.data.mongodb.core.query.Query.query(
+                org.springframework.data.mongodb.core.query.Criteria.where("_id").is(site.getId())),
+                new org.springframework.data.mongodb.core.query.Update().set("active", site.getActive())
+                        .set("missingSince", site.getMissingSince()).set("missingConfirmations", site.getMissingConfirmations())
+                        .set("deletedAt", site.getDeletedAt()).set("updatedAt", site.getUpdatedAt()), SiteDocument.class);
+        if (siteTracking != null) siteTracking.captureById(site.getId(), "HUAWEI_MEMBERSHIP");
     }
 
     private SiteDocument findExistingSite(String accountGroup, String siteCode) {
@@ -331,7 +285,8 @@ public class HuaweiSyncService implements MonitoringSitesSyncService {
         }
 
         // Compatibilité anciennes données avant l'ajout de providerAccountGroup.
-        return siteRepository.findByBrandAndSiteCode(Brand.HUAWEI, siteCode).orElse(null);
+        SiteDocument legacy = siteRepository.findByBrandAndSiteCode(Brand.HUAWEI, siteCode).orElse(null);
+        return legacy != null && isBlank(legacy.getProviderAccountGroup()) ? legacy : null;
     }
 
     private int deactivateMissingSites(
@@ -340,7 +295,7 @@ public class HuaweiSyncService implements MonitoringSitesSyncService {
             Set<String> completedGroups,
             Instant now
     ) {
-        if (receivedSiteIdentities == null || receivedSiteIdentities.isEmpty() || completedGroups == null || completedGroups.isEmpty()) {
+        if (receivedSiteIdentities == null || completedGroups == null || completedGroups.isEmpty()) {
             log.warn("Huawei missing-site deactivation skipped because provider returned no valid site identities.");
             return 0;
         }
@@ -369,17 +324,12 @@ public class HuaweiSyncService implements MonitoringSitesSyncService {
                 continue;
             }
 
-            site.setActive(false);
-            site.setSwapDate(null);
-            site.setMissingSince(site.getMissingSince() != null ? site.getMissingSince() : now);
-            site.setDeletedAt(now);
-            site.setUpdatedAt(now);
+            boolean confirmed = SiteMissingPolicy.confirmMissing(site, now);
+            persistMissing(site);
+            if (confirmed) deactivated++;
 
-            siteRepository.save(site);
-            deactivated++;
-
-            log.warn(
-                    "Huawei site group={} code={} marked inactive because it is no longer returned by FusionSolar.",
+            if (confirmed) log.warn(
+                    "Huawei site group={} code={} marked inactive after two complete inventories without it.",
                     siteGroup,
                     siteCode
             );

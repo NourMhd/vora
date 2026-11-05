@@ -11,6 +11,7 @@ import '../../auth/controllers/auth_controller.dart';
 import '../../dashboard/pages/dashboard_page.dart';
 import '../../sites/pages/sites_page.dart';
 import '../../swap_dates/pages/swap_dates_page.dart';
+import '../../planning/pages/planning_page.dart';
 import '../controllers/shell_controller.dart';
 
 class ShellPage extends GetView<ShellController> {
@@ -21,7 +22,9 @@ class ShellPage extends GetView<ShellController> {
     controller.syncFromRoute();
     final auth = Get.find<AuthController>();
 
-    final pages = const [
+    return Obx(() {
+    final canAccessPlanning = auth.canAccessPlanning;
+    final pages = <Widget>[
       DashboardPage(),
       SitesPage(),
       PerformancePage(),
@@ -29,8 +32,8 @@ class ShellPage extends GetView<ShellController> {
       AiReportPage(),
       ComparatifPage(),
       SwapDatesPage(),
+      if (canAccessPlanning) const PlanningPage(),
     ];
-
 
     return Scaffold(
       body: LayoutBuilder(
@@ -62,7 +65,7 @@ class ShellPage extends GetView<ShellController> {
               bottomNavigationBar: NavigationBar(
                 selectedIndex: controller.selectedIndex.value,
                 onDestinationSelected: controller.selectTab,
-                destinations: const [
+                destinations: [
                   NavigationDestination(
                     icon: Icon(Icons.space_dashboard_outlined),
                     selectedIcon: Icon(Icons.space_dashboard_rounded),
@@ -98,6 +101,7 @@ class ShellPage extends GetView<ShellController> {
                     selectedIcon: Icon(Icons.event_available_rounded),
                     label: 'Date swap',
                   ),
+                  if (canAccessPlanning) const NavigationDestination(icon: Icon(Icons.engineering_outlined), label: 'Planning terrain'),
                 ],
               ),
             ),
@@ -105,6 +109,7 @@ class ShellPage extends GetView<ShellController> {
         },
       ),
     );
+    });
   }
 }
 
@@ -119,133 +124,173 @@ class _SideNavigation extends StatelessWidget {
 
     return Container(
       width: 280,
-      padding: const EdgeInsets.fromLTRB(22, 24, 22, 20),
       decoration: const BoxDecoration(
         color: AppColors.midnightNavy,
         border: Border(right: BorderSide(color: Color(0x1AFFFFFF))),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const VoraLogo(dark: true, lockup: true, height: 65),
-          const SizedBox(height: 34),
+      child: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return Scrollbar(
+              thumbVisibility: false,
+              child: SingleChildScrollView(
+                physics: const ClampingScrollPhysics(),
+                padding: const EdgeInsets.fromLTRB(22, 24, 22, 20),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    minHeight: constraints.maxHeight - 44,
+                  ),
+                  child: IntrinsicHeight(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const VoraLogo(dark: true, lockup: true, height: 65),
+                        const SizedBox(height: 34),
 
-          Obx(
-            () => _NavItem(
-              icon: Icons.space_dashboard_rounded,
-              label: 'Overview',
-              selected: shell.selectedIndex.value == 0,
-              onTap: () => shell.selectTab(0),
-            ),
-          ),
-          const SizedBox(height: 10),
-          Obx(
-            () => _NavItem(
-              icon: Icons.domain_rounded,
-              label: 'Sites',
-              selected: shell.selectedIndex.value == 1,
-              onTap: () => shell.selectTab(1),
-            ),
-          ),
-          const SizedBox(height: 10),
-          Obx(
-            () => _NavItem(
-              icon: Icons.insights_rounded,
-              label: 'Suivi production',
-              selected: shell.selectedIndex.value == 2,
-              onTap: () => shell.selectTab(2),
-            ),
-          ),
-          const SizedBox(height: 10),
-          Obx(
-            () => _NavItem(
-              icon: Icons.notification_important_rounded,
-              label: 'Alarme',
-              selected: shell.selectedIndex.value == 3,
-              onTap: () => shell.selectTab(3),
-            ),
-          ),
-          const SizedBox(height: 10),
-          Obx(
-            () => _NavItem(
-              icon: Icons.auto_awesome_rounded,
-              label: 'Rapport AI',
-              selected: shell.selectedIndex.value == 4,
-              onTap: () => shell.selectTab(4),
-            ),
-          ),
-          const SizedBox(height: 10),
-          Obx(
-            () => _NavItem(
-              icon: Icons.compare_arrows_rounded,
-              label: 'Comparatif',
-              selected: shell.selectedIndex.value == 5,
-              onTap: () => shell.selectTab(5),
-            ),
-          ),
-          const SizedBox(height: 10),
-          Obx(
-            () => _NavItem(
-              icon: Icons.event_available_rounded,
-              label: 'Date swap',
-              selected: shell.selectedIndex.value == 6,
-              onTap: () => shell.selectTab(6),
-            ),
-          ),
+                        Obx(
+                          () => _NavItem(
+                            icon: Icons.space_dashboard_rounded,
+                            label: 'Overview',
+                            selected: shell.selectedIndex.value == 0,
+                            onTap: () => shell.selectTab(0),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
 
-          const Spacer(),
+                        Obx(
+                          () => _NavItem(
+                            icon: Icons.domain_rounded,
+                            label: 'Sites',
+                            selected: shell.selectedIndex.value == 1,
+                            onTap: () => shell.selectTab(1),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
 
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: AppColors.white.withOpacity(0.06),
-              borderRadius: BorderRadius.circular(22),
-              border: Border.all(color: AppColors.white.withOpacity(0.09)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Obx(
-                  () => Text(
-                    auth.accessLabel,
-                    style: const TextStyle(
-                      color: Color(0x99FFFFFF),
-                      fontSize: 10,
-                      fontWeight: FontWeight.w900,
-                      letterSpacing: 1.6,
+                        Obx(
+                          () => _NavItem(
+                            icon: Icons.insights_rounded,
+                            label: 'Suivi production',
+                            selected: shell.selectedIndex.value == 2,
+                            onTap: () => shell.selectTab(2),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+
+                        Obx(
+                          () => _NavItem(
+                            icon: Icons.notification_important_rounded,
+                            label: 'Alarme',
+                            selected: shell.selectedIndex.value == 3,
+                            onTap: () => shell.selectTab(3),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+
+                        Obx(
+                          () => _NavItem(
+                            icon: Icons.auto_awesome_rounded,
+                            label: 'Rapport AI',
+                            selected: shell.selectedIndex.value == 4,
+                            onTap: () => shell.selectTab(4),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+
+                        Obx(
+                          () => _NavItem(
+                            icon: Icons.compare_arrows_rounded,
+                            label: 'Comparatif',
+                            selected: shell.selectedIndex.value == 5,
+                            onTap: () => shell.selectTab(5),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+
+                        Obx(
+                          () => _NavItem(
+                            icon: Icons.event_available_rounded,
+                            label: 'Date swap',
+                            selected: shell.selectedIndex.value == 6,
+                            onTap: () => shell.selectTab(6),
+                          ),
+                        ),
+
+                                                const SizedBox(height: 10),
+
+
+                        Obx(() => auth.canAccessPlanning
+                            ? _NavItem(icon: Icons.engineering_outlined, label: 'Planning terrain', selected: shell.selectedIndex.value == 7, onTap: () => shell.selectTab(7))
+                            : const SizedBox.shrink()),
+                        if (auth.canAccessPlanning) const SizedBox(height: 10),
+                        const Spacer(),
+                        const SizedBox(height: 24),
+
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: AppColors.white.withOpacity(0.06),
+                            borderRadius: BorderRadius.circular(22),
+                            border: Border.all(
+                              color: AppColors.white.withOpacity(0.09),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Obx(
+                                () => Text(
+                                  auth.accessLabel,
+                                  style: const TextStyle(
+                                    color: Color(0x99FFFFFF),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 1.6,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Obx(
+                                () => Text(
+                                  auth.username,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: AppColors.white,
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                              SizedBox(
+                                width: double.infinity,
+                                child: OutlinedButton.icon(
+                                  onPressed: auth.logout,
+                                  icon: const Icon(
+                                    Icons.logout_rounded,
+                                    size: 18,
+                                  ),
+                                  label: const Text('Logout'),
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: AppColors.white,
+                                    side: BorderSide(
+                                      color: AppColors.white.withOpacity(0.16),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                const SizedBox(height: 8),
-                Obx(
-                  () => Text(
-                    auth.username,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: AppColors.white,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 14),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: auth.logout,
-                    icon: const Icon(Icons.logout_rounded, size: 18),
-                    label: const Text('Logout'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: AppColors.white,
-                      side: BorderSide(color: AppColors.white.withOpacity(0.16)),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
+              ),
+            );
+          },
+        ),
       ),
     );
   }
@@ -268,7 +313,9 @@ class _NavItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = selected ? AppColors.white : AppColors.white.withOpacity(disabled ? 0.32 : 0.68);
+    final color = selected
+        ? AppColors.white
+        : AppColors.white.withOpacity(disabled ? 0.32 : 0.68);
 
     return Material(
       color: Colors.transparent,
@@ -282,22 +329,28 @@ class _NavItem extends StatelessWidget {
             color: selected ? AppColors.deepTeal : Colors.transparent,
             borderRadius: BorderRadius.circular(18),
             border: Border.all(
-              color: selected ? AppColors.deepTeal : AppColors.white.withOpacity(0.06),
+              color: selected
+                  ? AppColors.deepTeal
+                  : AppColors.white.withOpacity(0.06),
             ),
           ),
           child: Row(
             children: [
               Icon(icon, color: color, size: 21),
               const SizedBox(width: 12),
-              Text(
-                label,
-                style: TextStyle(
-                  color: color,
-                  fontWeight: FontWeight.w900,
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: color,
+                    fontWeight: FontWeight.w900,
+                  ),
                 ),
               ),
               if (disabled) ...[
-                const Spacer(),
+                const SizedBox(width: 8),
                 Text(
                   'soon',
                   style: TextStyle(

@@ -209,21 +209,11 @@ public class AiReportService {
     }
 
     private ReportProductionSummaryDto buildProductionSummary(List<PerformanceReportRowDto> rows) {
-        double expected = sum(rows, PerformanceReportRowDto::getExpectedKwh);
-        double captured = sum(rows, PerformanceReportRowDto::getCapturedKwh);
-        double estimated = sum(rows, PerformanceReportRowDto::getEstimatedMissingKwh);
         double displayed = sum(rows, PerformanceReportRowDto::getActualKwh);
-        double diff = displayed - expected;
-        Double diffPct = Math.abs(expected) > 0.000001 ? round2(diff * 100.0 / expected) : null;
         return ReportProductionSummaryDto.builder()
-                .expectedKwh(round2(expected))
-                .capturedKwh(round2(captured))
-                .estimatedKwh(round2(estimated))
                 .displayedKwh(round2(displayed))
-                .differenceKwh(round2(diff))
-                .differencePercent(diffPct)
-                .bonusSites((int) rows.stream().filter(row -> "BONUS".equalsIgnoreCase(nullTo(row.getBonusMalus(), ""))).count())
-                .malusSites((int) rows.stream().filter(row -> "MALUS".equalsIgnoreCase(nullTo(row.getBonusMalus(), ""))).count())
+                .bonusSites(0)
+                .malusSites(0)
                 .build();
     }
 
@@ -240,8 +230,8 @@ public class AiReportService {
                 .missingDataSites(missing)
                 .totalInstalledPowerKw(round2(sum(rows, PerformanceReportRowDto::getInstalledPowerKw)))
                 .activeAlarms(activeAlarms)
-                .globalDifferencePercent(production.getDifferencePercent())
-                .globalStatus(globalStatus(production.getDifferencePercent(), activeAlarms, missing))
+                .globalDifferencePercent(null)
+                .globalStatus(globalStatus(null, activeAlarms, missing))
                 .build();
     }
 
@@ -273,17 +263,12 @@ public class AiReportService {
         return grouped.entrySet().stream()
                 .map(entry -> {
                     List<PerformanceReportRowDto> groupRows = entry.getValue();
-                    double expected = sum(groupRows, PerformanceReportRowDto::getExpectedKwh);
                     double actual = sum(groupRows, PerformanceReportRowDto::getActualKwh);
-                    double estimated = sum(groupRows, PerformanceReportRowDto::getEstimatedMissingKwh);
                     return ReportZoneAnalysisDto.builder()
                             .zone(entry.getKey())
                             .sitesCount(groupRows.size())
                             .installedPowerKw(round2(sum(groupRows, PerformanceReportRowDto::getInstalledPowerKw)))
-                            .expectedKwh(round2(expected))
                             .actualKwh(round2(actual))
-                            .estimatedKwh(round2(estimated))
-                            .differencePercent(percent(actual - expected, expected))
                             .activeAlarms(countAlarmsForZone(activeAlarms, groupRows))
                             .build();
                 })
@@ -297,40 +282,33 @@ public class AiReportService {
         return grouped.entrySet().stream()
                 .map(entry -> {
                     List<PerformanceReportRowDto> groupRows = entry.getValue();
-                    double expected = sum(groupRows, PerformanceReportRowDto::getExpectedKwh);
                     double actual = sum(groupRows, PerformanceReportRowDto::getActualKwh);
-                    double estimated = sum(groupRows, PerformanceReportRowDto::getEstimatedMissingKwh);
                     return ReportGovernorateAnalysisDto.builder()
                             .governorate(entry.getKey())
                             .zone(groupRows.stream().map(PerformanceReportRowDto::getZone).filter(Objects::nonNull).findFirst().orElse("UNKNOWN"))
                             .sitesCount(groupRows.size())
                             .installedPowerKw(round2(sum(groupRows, PerformanceReportRowDto::getInstalledPowerKw)))
-                            .expectedKwh(round2(expected))
                             .actualKwh(round2(actual))
-                            .estimatedKwh(round2(estimated))
-                            .differencePercent(percent(actual - expected, expected))
                             .activeAlarms((int) activeAlarms.stream().filter(alarm -> entry.getKey().equalsIgnoreCase(nullTo(alarm.getGovernorate(), "UNKNOWN"))).count())
                             .build();
                 })
-                .sorted(Comparator.comparing(ReportGovernorateAnalysisDto::getDifferencePercent, Comparator.nullsLast(Double::compareTo)))
+                .sorted(Comparator.comparing(ReportGovernorateAnalysisDto::getGovernorate, Comparator.nullsLast(String::compareTo)))
                 .toList();
     }
 
     private List<ReportSiteRankingDto> buildBestSites(List<PerformanceReportRowDto> rows) {
         return rows.stream()
-                .filter(row -> row.getDifferencePercent() != null)
-                .sorted(Comparator.comparing(PerformanceReportRowDto::getDifferencePercent, Comparator.nullsLast(Double::compareTo)).reversed())
+                .filter(row -> row.getActualKwh() != null && row.getActualKwh() > 0.0)
+                .sorted(Comparator.comparing(this::productionPerKwp, Comparator.nullsLast(Double::compareTo)).reversed())
                 .limit(RANKING_LIMIT)
-                .map(row -> toRanking(row, "Observation", "Site performant sur la période"))
+                .map(row -> toRanking(row, "Observation", "Production totale élevée sur la période"))
                 .toList();
     }
 
     private List<ReportSiteRankingDto> buildWorstSites(List<PerformanceReportRowDto> rows) {
         return rows.stream()
-                .filter(row -> row.getDifferencePercent() != null || isProblemStatus(row.getSiteStatus()) || nullTo(row.getDataStatus(), "OK").startsWith("MISSING"))
-                .sorted(Comparator
-                        .comparing((PerformanceReportRowDto row) -> priorityScore(row), Comparator.reverseOrder())
-                        .thenComparing(row -> Optional.ofNullable(row.getDifferencePercent()).orElse(999999.0)))
+                .filter(row -> isProblemStatus(row.getSiteStatus()))
+                .sorted(Comparator.comparing(PerformanceReportRowDto::getSiteName, Comparator.nullsLast(String::compareTo)))
                 .limit(RANKING_LIMIT)
                 .map(row -> toRanking(row, priorityForRow(row), reasonForRow(row)))
                 .toList();
@@ -379,40 +357,31 @@ public class AiReportService {
             ReportProductionSummaryDto production
     ) {
         List<ReportRecommendationDto> recommendations = new ArrayList<>();
-        if (alarms.getCriticalCount() != null && alarms.getCriticalCount() > 0) {
+        if (alarms.getActiveCount() != null && alarms.getActiveCount() > 0) {
             recommendations.add(ReportRecommendationDto.builder()
-                    .priority("Critique")
-                    .target("Sites avec alarmes critiques")
-                    .issue("Défaut, offline ou absence de monitoring longue")
-                    .action("Vérifier la connectivité, le statut fournisseur et les équipements avant toute analyse fine de performance.")
-                    .justification("Une alarme critique rend les KPI de production moins fiables.")
+                    .priority("Prioritaire")
+                    .target("Points à vérifier")
+                    .issue("Suivi opérationnel recommandé")
+                    .action("Contrôler les sites concernés et confirmer l’état terrain si le point de suivi persiste.")
+                    .justification("Le rapport garde une lecture synthétique et orientée action.")
                     .build());
         }
-        if (dataQuality.getReliabilityPercent() != null && dataQuality.getReliabilityPercent() < 85.0) {
-            recommendations.add(ReportRecommendationDto.builder()
-                    .priority("Élevée")
-                    .target("Qualité monitoring")
-                    .issue("Fiabilité des données inférieure à 85%")
-                    .action("Compléter l’historique manquant et contrôler les sites avec jours estimés.")
-                    .justification("La part estimée peut masquer une vraie sous-performance.")
-                    .build());
-        }
-        for (ReportSiteRankingDto site : worstSites.stream().limit(4).toList()) {
+        for (ReportSiteRankingDto site : worstSites.stream().limit(3).toList()) {
             recommendations.add(ReportRecommendationDto.builder()
                     .priority(site.getPriority())
                     .target(site.getSiteName())
                     .issue(site.getReason())
-                    .action("Comparer le site avec les meilleurs sites du même gouvernorat puis vérifier l’état onduleur, compteur et communication.")
-                    .justification("Écart période: " + signed(site.getDifferencePercent()) + " %.")
+                    .action("Comparer la production totale du site avec les sites proches du même gouvernorat et prioriser une vérification simple.")
+                    .justification("Site retenu dans les points de suivi opérationnel.")
                     .build());
         }
         if (recommendations.isEmpty()) {
             recommendations.add(ReportRecommendationDto.builder()
                     .priority("Normale")
                     .target("Parc photovoltaïque")
-                    .issue("Aucun risque majeur détecté")
-                    .action("Continuer le suivi quotidien et conserver la même règle de calcul réel + estimé pour le reporting.")
-                    .justification("Les KPI globaux ne montrent pas de dérive critique.")
+                    .issue("Performance globale cohérente")
+                    .action("Continuer le suivi périodique et conserver la même méthode de calcul de production totale.")
+                    .justification("Les KPI globaux ne montrent pas de dérive significative.")
                     .build());
         }
         return recommendations;
@@ -440,12 +409,9 @@ public class AiReportService {
                         .productionDaysCount(row.getProductionDaysCount())
                         .capturedDaysCount(row.getCapturedDaysCount())
                         .estimatedDaysCount(row.getEstimatedDaysCount())
-                        .expectedKwh(row.getExpectedKwh())
-                        .capturedKwh(row.getCapturedKwh())
-                        .estimatedKwh(row.getEstimatedMissingKwh())
                         .displayedKwh(row.getActualKwh())
-                        .differencePercent(row.getDifferencePercent())
-                        .bonusMalus(row.getBonusMalus())
+                        .differencePercent(null)
+                        .bonusMalus(null)
                         .dataStatus(row.getDataStatus())
                         .build())
                 .toList();
@@ -471,11 +437,9 @@ public class AiReportService {
                 .zone(row.getZone())
                 .governorate(row.getGovernorate())
                 .installedPowerKw(row.getInstalledPowerKw())
-                .expectedKwh(row.getExpectedKwh())
                 .actualKwh(row.getActualKwh())
-                .estimatedKwh(row.getEstimatedMissingKwh())
-                .differencePercent(row.getDifferencePercent())
-                .bonusMalus(row.getBonusMalus())
+                .differencePercent(null)
+                .bonusMalus(null)
                 .capturedDays(row.getCapturedDaysCount())
                 .estimatedDays(row.getEstimatedDaysCount())
                 .priority(priority)
@@ -484,29 +448,31 @@ public class AiReportService {
     }
 
     private int priorityScore(PerformanceReportRowDto row) {
-        if (isProblemStatus(row.getSiteStatus())) return 4;
-        if (nullTo(row.getDataStatus(), "OK").startsWith("MISSING")) return 3;
-        Double diff = row.getDifferencePercent();
-        if (diff != null && diff <= -20.0) return 2;
-        if (diff != null && diff < -10.0) return 1;
+        String status = nullTo(row.getSiteStatus(), "").toUpperCase(Locale.ROOT);
+        if (status.contains("FAULT") || status.contains("ALARM")) return 2;
+        if (status.contains("OFFLINE") || status.contains("DISCONNECTED")) return 1;
         return 0;
     }
 
     private String priorityForRow(PerformanceReportRowDto row) {
         int score = priorityScore(row);
-        if (score >= 4) return "Critique";
-        if (score >= 2) return "Élevée";
-        if (score == 1) return "Moyenne";
-        return "Faible";
+        if (score >= 2) return "Prioritaire";
+        if (score == 1) return "À suivre";
+        return "Observation";
     }
 
     private String reasonForRow(PerformanceReportRowDto row) {
-        if (isProblemStatus(row.getSiteStatus())) return "Statut fournisseur non sain: " + row.getSiteStatus();
-        if (nullTo(row.getDataStatus(), "OK").startsWith("MISSING")) return "Données de calcul manquantes: " + row.getDataStatus();
-        Double diff = row.getDifferencePercent();
-        if (diff != null && diff <= -20.0) return "Sous-performance importante par rapport au prévu";
-        if (diff != null && diff < -10.0) return "Sous-performance modérée à surveiller";
-        return "Écart négatif léger";
+        String status = nullTo(row.getSiteStatus(), "").toUpperCase(Locale.ROOT);
+        if (status.contains("FAULT") || status.contains("ALARM")) return "Point de suivi opérationnel";
+        if (status.contains("OFFLINE") || status.contains("DISCONNECTED")) return "Disponibilité à vérifier";
+        return "Observation de suivi";
+    }
+
+    private Double productionPerKwp(PerformanceReportRowDto row) {
+        Double actual = row.getActualKwh();
+        Double power = row.getInstalledPowerKw();
+        if (actual == null || power == null || Math.abs(power) < 0.000001) return null;
+        return actual / power;
     }
 
     private boolean isProblemStatus(String status) {
@@ -515,18 +481,15 @@ public class AiReportService {
     }
 
     private String globalStatus(Double differencePercent, int activeAlarms, int missing) {
-        double diff = differencePercent == null ? 0.0 : differencePercent;
-        if (activeAlarms > 0 || diff <= -20.0) return "CRITIQUE";
-        if (missing > 0 || diff <= -10.0) return "SURVEILLANCE";
-        if (diff >= 0) return "BON";
-        return "NORMAL";
+        if (activeAlarms == 0) return "BON";
+        return "À SUIVRE";
     }
 
     private String dataQualityStatus(Double reliability, Double estimatedShare, int missingSites) {
         double rel = reliability == null ? 0.0 : reliability;
         double share = estimatedShare == null ? 0.0 : estimatedShare;
-        if (missingSites > 0 || rel < 70.0 || share > 30.0) return "FAIBLE";
-        if (rel < 90.0 || share > 15.0) return "MOYENNE";
+        if (missingSites > 0 || rel < 70.0 || share > 30.0) return "À CONSOLIDER";
+        if (rel < 90.0 || share > 15.0) return "CORRECTE";
         return "BONNE";
     }
 

@@ -54,4 +54,15 @@ public class SiteHistoryDocument {
     private Instant createdAt;
 
     private Instant updatedAt;
+
+    /** Etat technique backend; non expose au frontend. */
+    private String collectionStatus;
+
+    private Integer consecutiveEmptyAttempts;
+
+    private Instant nextRetryAt;
+
+    private Instant lastSuccessfulSyncAt;
+
+    private String lastCollectionError;
 }

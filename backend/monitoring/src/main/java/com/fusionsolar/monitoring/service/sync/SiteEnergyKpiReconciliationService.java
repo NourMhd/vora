@@ -22,10 +22,17 @@ import java.util.Optional;
 /**
  * Normalise les KPI énergie affichés par le dashboard.
  *
- * Règle importante:
- * - pour Huawei et autres providers, les historiques Mongo peuvent corriger month/year;
- * - pour Solis, on ne remplace pas les KPI live par l'historique cache,
- *   car certains historiques Solis peuvent être incohérents avec la plateforme Solis.
+ * Règle importante après correction Solis/Growatt:
+ * - DAY history = courbe de puissance horaire en kW.
+ * - MONTH history = énergie journalière en kWh.
+ * - YEAR history = énergie mensuelle en kWh.
+ *
+ * Donc on ne doit jamais faire:
+ * dayEnergyKwh = somme(points DAY)
+ *
+ * Le KPI jour vient du détail live fournisseur:
+ * - Growatt: /v1/plant/data today_energy
+ * - Solis: stationDetail / userStationList dayEnergy
  */
 @Slf4j
 @Service
@@ -58,28 +65,25 @@ public class SiteEnergyKpiReconciliationService {
         }
 
         /*
-         * Important:
-         * Pour SOLIS, les KPI affichés dans la page Sites doivent rester cohérents
-         * avec les valeurs live venant de Solis. On ne les écrase donc pas avec
-         * les historiques Mongo, qui peuvent parfois contenir des valeurs trop grandes.
+         * Pour SOLIS, les KPI live restent la source officielle.
+         * On ne les écrase pas avec l'historique cache.
          */
         if (site.getBrand() == Brand.SOLIS) {
             return site;
         }
 
-        String today = LocalDate.now(TUNIS_ZONE).toString();
         String currentMonth = YearMonth.now(TUNIS_ZONE).toString();
         String currentYear = String.valueOf(LocalDate.now(TUNIS_ZONE).getYear());
 
         boolean changed = false;
 
-        Optional<Double> dayFromHistory = sumCachedHistory(site, HistoryGranularity.DAY, today);
-        if (dayFromHistory.isPresent()) {
-            changed |= setDayEnergy(site, dayFromHistory.get());
-        }
+        /*
+         * Ne pas utiliser HistoryGranularity.DAY ici.
+         * DAY = puissance horaire kW, pas énergie kWh.
+         */
 
         Optional<Double> monthFromHistory = sumCachedHistory(site, HistoryGranularity.MONTH, currentMonth);
-        if (monthFromHistory.isPresent()) {
+        if (monthFromHistory.isPresent() && !hasLiveCurrentMonth(site)) {
             changed |= setMonthEnergy(site, monthFromHistory.get());
         }
 
@@ -95,7 +99,7 @@ public class SiteEnergyKpiReconciliationService {
         }
 
         site.setUpdatedAt(Instant.now());
-        return siteRepository.save(site);
+        return site; // Derived display values must not replace the live Mongo document.
     }
 
     public SiteDocument reconcileAfterHistoryLoad(
@@ -109,40 +113,44 @@ public class SiteEnergyKpiReconciliationService {
         }
 
         /*
-         * Même règle que reconcileCurrentKpisFromCache:
-         * on ne laisse pas l'historique Solis écraser les KPI live du site.
+         * Pour SOLIS, on garde les KPI live.
          */
         if (site.getBrand() == Brand.SOLIS) {
             return site;
         }
 
         String normalizedType = type.trim().toLowerCase();
-        String today = LocalDate.now(TUNIS_ZONE).toString();
         String currentMonth = YearMonth.now(TUNIS_ZONE).toString();
         String currentYear = String.valueOf(LocalDate.now(TUNIS_ZONE).getYear());
 
-        double sum = sumPoints(points);
         boolean changed = false;
 
         switch (normalizedType) {
             case "day" -> {
-                if (today.equals(value)) {
-                    changed |= setDayEnergy(site, sum);
-                    changed |= enforceCurrentYearLowerBound(site);
-                }
+                /*
+                 * Ne rien faire.
+                 * Les points DAY sont des puissances kW.
+                 * Les sommer casserait le KPI jour.
+                 */
+                return site;
             }
+
             case "month" -> {
-                if (currentMonth.equals(value)) {
+                if (currentMonth.equals(value) && !hasLiveCurrentMonth(site)) {
+                    double sum = sumPoints(points);
                     changed |= setMonthEnergy(site, sum);
                     changed |= enforceCurrentYearLowerBound(site);
                 }
             }
+
             case "year" -> {
                 if (currentYear.equals(value)) {
+                    double sum = sumPoints(points);
                     changed |= setYearEnergy(site, sum);
                     changed |= enforceCurrentYearLowerBound(site);
                 }
             }
+
             default -> {
                 return site;
             }
@@ -153,7 +161,13 @@ public class SiteEnergyKpiReconciliationService {
         }
 
         site.setUpdatedAt(Instant.now());
-        return siteRepository.save(site);
+        return site; // Derived display values must not replace the live Mongo document.
+    }
+
+    private boolean hasLiveCurrentMonth(SiteDocument site) {
+        return site.getBrand() == Brand.HUAWEI && site.getMonthEnergyLastSyncAt() != null
+                && YearMonth.from(site.getMonthEnergyLastSyncAt().atZone(TUNIS_ZONE))
+                        .equals(YearMonth.now(TUNIS_ZONE));
     }
 
     private Optional<Double> sumCachedHistory(
@@ -161,6 +175,14 @@ public class SiteEnergyKpiReconciliationService {
             HistoryGranularity granularity,
             String bucket
     ) {
+        /*
+         * Protection supplémentaire:
+         * on ne somme jamais DAY, car DAY = puissance horaire kW.
+         */
+        if (granularity == HistoryGranularity.DAY) {
+            return Optional.empty();
+        }
+
         Optional<SiteHistoryDocument> grouped = siteHistoryRepository
                 .findByBrandAndProviderAccountGroupAndSiteCodeAndGranularityAndBucket(
                         site.getBrand(),
@@ -189,9 +211,11 @@ public class SiteEnergyKpiReconciliationService {
         if (site != null && site.getProviderAccountGroup() != null && !site.getProviderAccountGroup().isBlank()) {
             return site.getProviderAccountGroup().trim();
         }
+
         if (site != null && site.getProviderAccountKey() != null && !site.getProviderAccountKey().isBlank()) {
             return site.getProviderAccountKey().trim();
         }
+
         return "primary";
     }
 

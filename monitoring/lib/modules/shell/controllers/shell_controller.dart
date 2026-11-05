@@ -1,6 +1,7 @@
 import 'package:get/get.dart';
 
 import '../../../app/routes/app_routes.dart';
+import '../../auth/controllers/auth_controller.dart';
 
 class ShellController extends GetxController {
   final selectedIndex = 0.obs;
@@ -18,14 +19,16 @@ class ShellController extends GetxController {
   }
 
   void syncFromRoute([String? route]) {
-    final index = _indexForRoute(route ?? Get.currentRoute);
+    final requested = _indexForRoute(route ?? Get.currentRoute);
+    final index = requested == 7 && !Get.find<AuthController>().canAccessPlanning ? 0 : requested;
     if (selectedIndex.value != index) {
       selectedIndex.value = index;
     }
   }
 
   void selectTab(int index) {
-    final safeIndex = index.clamp(0, 6).toInt();
+    final safeIndex = index.clamp(0, 7).toInt();
+    if (safeIndex == 7 && !Get.find<AuthController>().canAccessPlanning) return;
 
     final targetRoute = switch (safeIndex) {
       1 => AppRoutes.sites,
@@ -34,6 +37,7 @@ class ShellController extends GetxController {
       4 => AppRoutes.aiReport,
       5 => AppRoutes.comparatif,
       6 => AppRoutes.swapDates,
+      7 => AppRoutes.planning,
       _ => AppRoutes.dashboard,
     };
 
@@ -76,6 +80,7 @@ class ShellController extends GetxController {
       return 6;
     }
 
+    if (cleanRoute == AppRoutes.planning) return 7;
     return 0;
   }
 

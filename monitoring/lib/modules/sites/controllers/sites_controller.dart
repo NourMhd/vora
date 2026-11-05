@@ -1,20 +1,26 @@
 import 'dart:async';
 
+import 'package:intl/intl.dart';
+
 import 'package:get/get.dart';
 
 import '../../../core/network/api_exception.dart';
 import '../../../core/sync/front_sync_policy.dart';
 import '../../../core/utils/status_utils.dart';
+import '../../../core/utils/file_downloader.dart';
+import '../../../core/utils/sites_excel_export.dart';
 import '../../../data/models/site_summary.dart';
 import '../../../data/repositories/monitoring_repository.dart';
 
 class SitesController extends GetxController {
-  SitesController({required MonitoringRepository repository}) : _repository = repository;
+  SitesController({required MonitoringRepository repository})
+    : _repository = repository;
 
   final MonitoringRepository _repository;
 
   final isLoading = false.obs;
   final isRefreshing = false.obs;
+  final isExporting = false.obs;
   final errorMessage = RxnString();
   final lastRefresh = Rxn<DateTime>();
   final autoRefreshEnabled = true.obs;
@@ -38,13 +44,16 @@ class SitesController extends GetxController {
   bool _fetchInFlight = false;
 
   static const zoneGovernments = <String, List<String>>{
-    'Zone A': ['ARI', 'BAR', 'MAN', 'JEN', 'ZAG','BIZ', 'TUN'],
+    'Zone A': ['ARI', 'BAR', 'MAN', 'JEN', 'ZAG', 'BIZ', 'TUN'],
     'Zone B': ['SFA', 'KAI', 'SOU'],
     'Zone C': ['MED', 'TAT', 'GAB'],
   };
 
   static List<String> get allGovernments {
-    final values = zoneGovernments.values.expand((items) => items).toSet().toList();
+    final values = zoneGovernments.values
+        .expand((items) => items)
+        .toSet()
+        .toList();
     values.sort();
     return values;
   }
@@ -54,7 +63,10 @@ class SitesController extends GetxController {
       return ['ALL', ...allGovernments];
     }
 
-    return ['ALL', ...(zoneGovernments[selectedZone.value] ?? const <String>[])];
+    return [
+      'ALL',
+      ...(zoneGovernments[selectedZone.value] ?? const <String>[]),
+    ];
   }
 
   @override
@@ -167,7 +179,8 @@ class SitesController extends GetxController {
       final siteZone = _zoneForGovernor(siteGovernor);
       final sitePlantType = _plantTypeForSite(site);
 
-      final matchesQuery = query.isEmpty ||
+      final matchesQuery =
+          query.isEmpty ||
           site.siteName.toLowerCase().contains(query) ||
           site.siteCode.toLowerCase().contains(query) ||
           site.brand.toLowerCase().contains(query) ||
@@ -175,8 +188,10 @@ class SitesController extends GetxController {
           (siteZone ?? '').toLowerCase().contains(query) ||
           sitePlantType.toLowerCase().contains(query);
 
-      final matchesBrand = brand == 'ALL' || site.brand.toUpperCase() == brand.toUpperCase();
-      final matchesStatus = status == 'ALL' || normalizedStatus == status.toLowerCase();
+      final matchesBrand =
+          brand == 'ALL' || site.brand.toUpperCase() == brand.toUpperCase();
+      final matchesStatus =
+          status == 'ALL' || normalizedStatus == status.toLowerCase();
       final matchesFaults = !onlyFaults || normalizedStatus == 'faulty';
 
       final matchesZone = zone == 'ALL' || siteZone == zone;
@@ -194,6 +209,95 @@ class SitesController extends GetxController {
 
     filtered.sort(_compareSites);
     return filtered;
+  }
+
+  Future<void> exportFilteredSites() async {
+    if (isExporting.value) return;
+    // Capture the displayed list, its order and filters before any async work.
+    final snapshot = List<SiteSummary>.of(filteredSites);
+    if (snapshot.isEmpty) {
+      Get.snackbar(
+        'Export impossible',
+        'Aucun site ne correspond aux filtres.',
+        snackPosition: SnackPosition.BOTTOM,
+      );
+      return;
+    }
+    final exportedAt = DateTime.now();
+    final filters = <String, String>{
+      'Recherche': searchQuery.value.trim().isEmpty
+          ? 'Aucune'
+          : searchQuery.value.trim(),
+      'Marque': selectedBrand.value == 'ALL' ? 'Toutes' : selectedBrand.value,
+      'État': selectedStatus.value == 'ALL'
+          ? 'Tous'
+          : SitesExcelExport.statusLabel(
+              StatusUtils.normalize(selectedStatus.value),
+            ),
+      'Zone': selectedZone.value == 'ALL' ? 'Toutes' : selectedZone.value,
+      'Gouvernorat': selectedGovernor.value == 'ALL'
+          ? 'Tous'
+          : selectedGovernor.value,
+      'Type': selectedPlantType.value == 'ALL'
+          ? 'Tous'
+          : selectedPlantType.value,
+      'Défauts uniquement': faultsOnly.value ? 'Oui' : 'Non',
+      'Tri':
+          {
+            'commissioningDate': 'Date de mise en service',
+            'dayEnergy': 'Énergie du jour',
+            'monthEnergy': 'Énergie du mois',
+            'totalEnergy': 'Énergie totale',
+            'installedPower': 'Puissance installée',
+          }[sortBy.value] ??
+          sortBy.value,
+      'Ordre': sortDirection.value == 'asc' ? 'Ascendant' : 'Descendant',
+    };
+    final rows = snapshot
+        .map((site) {
+          final governor = _governorForSite(site);
+          return SitesExcelRow(
+            name: site.siteName,
+            code: site.siteCode,
+            brand: site.brand,
+            status: StatusUtils.normalize(site.status),
+            zone: _zoneForGovernor(governor) ?? 'Non renseignée',
+            governor: governor ?? 'Non renseigné',
+          );
+        })
+        .toList(growable: false);
+    final refreshedAt = lastRefresh.value;
+    isExporting.value = true;
+    try {
+      // Let Flutter paint the progress indicator before creating the workbook.
+      await Future<void>.delayed(Duration.zero);
+      final bytes = SitesExcelExport.build(
+        rows: rows,
+        filters: filters,
+        exportedAt: exportedAt,
+        refreshedAt: refreshedAt,
+      );
+      await downloadBytes(
+        bytes: bytes,
+        filename:
+            'vora_sites_${DateFormat('yyyyMMdd_HHmmss').format(exportedAt)}.xlsx',
+        mimeType:
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      Get.snackbar(
+        'Export terminé',
+        '${rows.length} sites exportés selon les filtres appliqués.',
+        snackPosition: SnackPosition.BOTTOM,
+      );
+    } catch (_) {
+      Get.snackbar(
+        'Erreur export',
+        'Impossible de télécharger le fichier Excel. Réessaie.',
+        snackPosition: SnackPosition.BOTTOM,
+      );
+    } finally {
+      isExporting.value = false;
+    }
   }
 
   void setZoneFilter(String zone) {
@@ -231,19 +335,19 @@ class SitesController extends GetxController {
     faultsOnly.value = false;
   }
 
- String _plantTypeForSite(SiteSummary site) {
-  final kwp = site.installedPowerKw;
+  String _plantTypeForSite(SiteSummary site) {
+    final kwp = site.installedPowerKw;
 
-  if (kwp <= 0) {
-    return 'UNKNOWN';
+    if (kwp <= 0) {
+      return 'UNKNOWN';
+    }
+
+    if (kwp >= 1 && kwp <= 5) {
+      return 'RT';
+    }
+
+    return 'GF';
   }
-
-  if (kwp >= 1 && kwp <= 5) {
-    return 'RT';
-  }
-
-  return 'GF';
-}
 
   String? _governorForSite(SiteSummary site) {
     final text = '${site.siteCode} ${site.siteName}'.toUpperCase();
@@ -266,7 +370,9 @@ class SitesController extends GetxController {
         .toList();
 
     return tokens.any(
-          (token) => token == normalizedGovernor || token.startsWith(normalizedGovernor),
+          (token) =>
+              token == normalizedGovernor ||
+              token.startsWith(normalizedGovernor),
         ) ||
         text.contains(normalizedGovernor);
   }
@@ -343,7 +449,10 @@ class SitesController extends GetxController {
     if (iso != null) return iso;
 
     final normalized = raw.replaceAll('/', '-');
-    final parts = normalized.split('-').map((part) => int.tryParse(part)).toList();
+    final parts = normalized
+        .split('-')
+        .map((part) => int.tryParse(part))
+        .toList();
 
     if (parts.length != 3 || parts.any((part) => part == null)) {
       return null;

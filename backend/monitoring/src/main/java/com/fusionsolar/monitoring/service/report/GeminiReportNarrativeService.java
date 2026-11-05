@@ -293,15 +293,14 @@ public class GeminiReportNarrativeService {
         compact.put("scope", preview.getScope());
         compact.put("scopeValue", preview.getScopeValue());
         compact.put("reportType", preview.getReportType());
-        compact.put("globalKpis", preview.getGlobalKpis());
-        compact.put("productionSummary", preview.getProductionSummary());
-        compact.put("dataQuality", preview.getDataQuality());
-        compact.put("zoneAnalysis", safeLimit(preview.getZoneAnalysis(), 8));
-        compact.put("governorateAnalysis", safeLimit(preview.getGovernorateAnalysis(), 12));
-        compact.put("bestSites", safeLimit(preview.getBestSites(), 6));
-        compact.put("worstSites", safeLimit(preview.getWorstSites(), 6));
-        compact.put("alarms", preview.getAlarms());
-        compact.put("recommendationsBackend", safeLimit(preview.getRecommendations(), 8));
+        compact.put("globalKpis", publicGlobalKpis(preview));
+        compact.put("production", publicProduction(preview));
+        compact.put("zoneAnalysis", safeLimit(publicZoneAnalysis(preview), 8));
+        compact.put("governorateAnalysis", safeLimit(publicGovernorateAnalysis(preview), 12));
+        compact.put("bestSites", safeLimit(publicRanking(preview.getBestSites()), 6));
+        compact.put("sitesToFollow", safeLimit(publicRanking(preview.getWorstSites()), 6));
+        compact.put("pointsToCheck", publicPointsToCheck(preview));
+        compact.put("recommendationsBackend", safeLimit(publicRecommendations(preview), 8));
 
         return """
                 Tu es expert en monitoring photovoltaïque et performance énergétique.
@@ -311,7 +310,21 @@ public class GeminiReportNarrativeService {
                 Ne calcule pas de nouveaux KPI.
                 N'invente aucune donnée.
                 Ne modifie pas les valeurs numériques.
-                Sois clair, concis, opérationnel et orienté décision.
+
+                Règle métier obligatoire :
+                - Utiliser une seule valeur de production : production totale.
+                - La production totale est déjà calculée par le backend et correspond à la valeur métier affichée au client.
+                - Ne pas détailler l'origine de la valeur de production totale.
+                - Ne pas séparer la production en plusieurs composantes.
+                - Ne pas utiliser de référence théorique, de bonus/malus ou de pourcentage comparatif.
+                - Les valeurs kWh affichées doivent rester sous une seule valeur finale : production totale.
+
+                Ton demandé :
+                - Style professionnel, rassurant, non alarmiste.
+                - Éviter les termes anxiogènes comme "critique", "défaut grave", "risque majeur", sauf si le backend fournit explicitement une dégradation extrême.
+                - Parler de "points à vérifier", "sites à suivre" et "actions recommandées".
+                - Mettre en avant la performance globale avant les points d'attention.
+                - Ne pas transformer le rapport en liste de défauts.
 
                 Contraintes de sortie obligatoires :
                 - Répondre uniquement en JSON strict valide.
@@ -326,6 +339,99 @@ public class GeminiReportNarrativeService {
                 Données du rapport :
                 """
                 + objectMapper.writeValueAsString(compact);
+    }
+
+
+    private Map<String, Object> publicGlobalKpis(AiReportPreviewDto preview) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (preview == null || preview.getGlobalKpis() == null) return m;
+        var kpi = preview.getGlobalKpis();
+        m.put("totalSites", kpi.getTotalSites());
+        m.put("healthySites", kpi.getHealthySites());
+        int toCheck = safeInt(kpi.getFaultySites()) + safeInt(kpi.getDisconnectedSites()) + safeInt(kpi.getActiveAlarms());
+        m.put("pointsToCheckCount", toCheck);
+        m.put("totalInstalledPowerKw", kpi.getTotalInstalledPowerKw());
+        m.put("globalStatus", kpi.getGlobalStatus());
+        return m;
+    }
+
+    private Map<String, Object> publicProduction(AiReportPreviewDto preview) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (preview == null || preview.getProductionSummary() == null) return m;
+        var p = preview.getProductionSummary();
+        m.put("totalProductionKwh", p.getDisplayedKwh());
+        return m;
+    }
+
+    private List<Map<String, Object>> publicZoneAnalysis(AiReportPreviewDto preview) {
+        if (preview == null || preview.getZoneAnalysis() == null) return List.of();
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (var row : preview.getZoneAnalysis()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("zone", row.getZone());
+            m.put("sitesCount", row.getSitesCount());
+            m.put("totalProductionKwh", row.getActualKwh());
+            m.put("pointsToCheckCount", row.getActiveAlarms());
+            list.add(m);
+        }
+        return list;
+    }
+
+    private List<Map<String, Object>> publicGovernorateAnalysis(AiReportPreviewDto preview) {
+        if (preview == null || preview.getGovernorateAnalysis() == null) return List.of();
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (var row : preview.getGovernorateAnalysis()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("governorate", row.getGovernorate());
+            m.put("zone", row.getZone());
+            m.put("sitesCount", row.getSitesCount());
+            m.put("totalProductionKwh", row.getActualKwh());
+            m.put("pointsToCheckCount", row.getActiveAlarms());
+            list.add(m);
+        }
+        return list;
+    }
+
+    private List<Map<String, Object>> publicRanking(List<com.fusionsolar.monitoring.dto.report.ReportSiteRankingDto> ranking) {
+        if (ranking == null || ranking.isEmpty()) return List.of();
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (var site : ranking) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("siteName", site.getSiteName());
+            m.put("governorate", site.getGovernorate());
+            m.put("totalProductionKwh", site.getActualKwh());
+            m.put("priority", site.getPriority());
+            m.put("reason", site.getReason());
+            list.add(m);
+        }
+        return list;
+    }
+
+    private Map<String, Object> publicPointsToCheck(AiReportPreviewDto preview) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (preview == null || preview.getAlarms() == null) return m;
+        var a = preview.getAlarms();
+        m.put("count", a.getActiveCount());
+        m.put("summaryLabel", "points à vérifier");
+        return m;
+    }
+
+    private List<Map<String, Object>> publicRecommendations(AiReportPreviewDto preview) {
+        if (preview == null || preview.getRecommendations() == null) return List.of();
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (var rec : preview.getRecommendations()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("priority", rec.getPriority());
+            m.put("target", rec.getTarget());
+            m.put("action", rec.getAction());
+            m.put("justification", rec.getJustification());
+            list.add(m);
+        }
+        return list;
+    }
+
+    private int safeInt(Integer value) {
+        return value == null ? 0 : value;
     }
 
     private Map<String, Object> narrativeSchema() {
@@ -343,7 +449,7 @@ public class GeminiReportNarrativeService {
         ));
         properties.put("riskAnalysis", Map.of(
                 "type", "string",
-                "description", "Analyse courte des risques opérationnels, data quality et performance. Maximum 900 caractères."
+                "description", "Analyse synthétique, professionnelle et non alarmiste des points de vigilance et de la performance. Maximum 900 caractères."
         ));
         properties.put("recommendedActions", Map.of(
                 "type", "array",

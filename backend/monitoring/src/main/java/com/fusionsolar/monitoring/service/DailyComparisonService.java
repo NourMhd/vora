@@ -92,11 +92,6 @@ public class DailyComparisonService {
                 .map(site -> loadSiteValues(site, historyStart, historyEnd))
                 .toList();
 
-        Map<String, Map<YearMonth, Double>> monthlyRealAveragesBySite = new HashMap<>();
-        for (ProductionEstimationService.DailySiteProduction siteValue : siteValues) {
-            monthlyRealAveragesBySite.put(siteValue.siteCode(), productionEstimationService.monthlyRealAverages(siteValue));
-        }
-
         Map<String, Double> historicalTotals = new HashMap<>();
         Map<String, Double> estimatedTotals = new HashMap<>();
         List<DailyComparisonRowDto> historicalRows = new ArrayList<>();
@@ -111,7 +106,7 @@ public class DailyComparisonService {
                 DailyComparisonCellDto historicalCell = historicalCell(siteValue, cursor);
                 DailyComparisonCellDto estimatedCell = estimatedCell(
                         siteValue,
-                        monthlyRealAveragesBySite.get(siteValue.siteCode()),
+                        siteValues,
                         cursor
                 );
 
@@ -315,7 +310,7 @@ public class DailyComparisonService {
 
     private DailyComparisonCellDto estimatedCell(
             ProductionEstimationService.DailySiteProduction siteValue,
-            Map<YearMonth, Double> monthlyRealAverages,
+            List<ProductionEstimationService.DailySiteProduction> allSites,
             LocalDate day
     ) {
         if (siteValue.document() == null) {
@@ -327,7 +322,7 @@ public class DailyComparisonService {
         }
 
         ProductionEstimationService.DailyProductionDecision decision = productionEstimationService
-                .decideDailyProduction(siteValue, day, monthlyRealAverages);
+                .decideDailyProduction(siteValue, allSites, day);
 
         if (decision.monitored() && decision.effectiveValue() != null) {
             return new DailyComparisonCellDto(

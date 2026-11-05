@@ -41,23 +41,28 @@ public class SolisHistorySyncService {
     @Value("${app.solis-sync.min-history-provider-delay-ms:1300}")
     private long minHistoryProviderDelayMs;
 
+    @Value("${app.history-backfill.max-lookback-months:120}")
+    private int maxLookbackMonths;
+
+    @Value("${app.history-backfill.incomplete-month-refresh-ms:21600000}")
+    private long incompleteMonthRefreshMs;
+
+    @Value("${app.history-backfill.month-finalization-grace-hours:6}")
+    private int monthFinalizationGraceHours;
+
     private final Object historyProviderLock = new Object();
     private Instant lastHistoryProviderCallAt = Instant.EPOCH;
 
-    public List<HistoryPointDto> getHistory(
-            SiteDocument site,
-            String type,
-            String value
-    ) {
+    public List<HistoryPointDto> getHistory(SiteDocument site, String type, String value) {
         return getHistory(site, type, value, false);
     }
 
-    public List<HistoryPointDto> getHistory(
-            SiteDocument site,
-            String type,
-            String value,
-            boolean forceRefresh
-    ) {
+    public List<HistoryPointDto> getHistory(SiteDocument site, String type, String value, boolean forceRefresh) {
+        String key = "Solis|" + site.getProviderAccountGroup() + "|" + site.getSiteCode() + "|" + type + "|" + value;
+        return HistorySingleFlight.execute(key, () -> loadHistory(site, type, value, forceRefresh));
+    }
+
+    private List<HistoryPointDto> loadHistory(SiteDocument site, String type, String value, boolean forceRefresh) {
         HistoryGranularity granularity = siteMongoMapper.toGranularity(type);
 
         SiteHistoryDocument cached = siteHistoryRepository
@@ -69,32 +74,57 @@ public class SolisHistorySyncService {
                 )
                 .orElse(null);
 
-        if (!forceRefresh && isHistoryFresh(cached, granularity, value)) {
-            return safePoints(cached);
+        if (!forceRefresh && isHistoryFresh(site, cached, granularity, value)) {
+            return clampMonthPoints(
+                    site,
+                    granularity,
+                    value,
+                    safePoints(cached)
+            );
         }
 
         try {
             waitForHistoryProviderSlot();
 
-            List<HistoryPointDto> points = solisMonitoringProvider.getHistory(
+            List<HistoryPointDto> loadedPoints = solisMonitoringProvider.getHistory(
                     site.getSiteCode(),
                     type,
                     value
             );
 
-            siteHistoryRepository.save(
-                    siteMongoMapper.toSiteHistoryDocument(
-                            Brand.SOLIS,
-                            site.getSiteCode(),
-                            granularity,
-                            value,
-                            points,
-                            cached,
-                            Instant.now()
-                    )
+            List<HistoryPointDto> mergedPoints = HistoryBackfillCompletenessSupport.mergeHistoryPoints(
+                    cached != null ? cached.getPoints() : List.of(),
+                    loadedPoints,
+                    granularity,
+                    TUNIS_ZONE
             );
 
-            return points;
+            List<HistoryPointDto> pointsToSave = clampMonthPoints(
+                    site,
+                    granularity,
+                    value,
+                    mergedPoints
+            );
+
+            SiteHistoryDocument document = siteMongoMapper.toSiteHistoryDocument(
+                    Brand.SOLIS,
+                    site.getSiteCode(),
+                    granularity,
+                    value,
+                    pointsToSave,
+                    cached,
+                    Instant.now()
+            );
+            document.setProviderAccountKey(site.getProviderAccountKey());
+            document.setProviderAccountGroup(site.getProviderAccountGroup());
+            if (loadedPoints != null && !loadedPoints.isEmpty()) {
+                HistoryCollectionStateSupport.markSuccessful(document, Instant.now());
+            }
+            siteHistoryRepository.save(document);
+
+            logMonthSaveStatus(site, granularity, value, loadedPoints, pointsToSave, document);
+
+            return pointsToSave;
 
         } catch (Exception e) {
             if (forceRefresh) {
@@ -117,7 +147,13 @@ public class SolisHistorySyncService {
                         value,
                         e.getMessage()
                 );
-                return safePoints(cached);
+
+                return clampMonthPoints(
+                        site,
+                        granularity,
+                        value,
+                        safePoints(cached)
+                );
             }
 
             log.warn(
@@ -150,22 +186,33 @@ public class SolisHistorySyncService {
         try {
             waitForHistoryProviderSlot();
 
-            List<HistoryPointDto> points =
+            List<HistoryPointDto> loadedPoints =
                     solisMonitoringProvider.getYearlyHistory(site.getSiteCode());
 
-            siteHistoryRepository.save(
-                    siteMongoMapper.toSiteHistoryDocument(
-                            Brand.SOLIS,
-                            site.getSiteCode(),
-                            HistoryGranularity.YEARLY,
-                            bucket,
-                            points,
-                            cached,
-                            Instant.now()
-                    )
+            List<HistoryPointDto> pointsToSave = HistoryBackfillCompletenessSupport.mergeHistoryPoints(
+                    cached != null ? cached.getPoints() : List.of(),
+                    loadedPoints,
+                    HistoryGranularity.YEARLY,
+                    TUNIS_ZONE
             );
 
-            return points;
+            SiteHistoryDocument document = siteMongoMapper.toSiteHistoryDocument(
+                    Brand.SOLIS,
+                    site.getSiteCode(),
+                    HistoryGranularity.YEARLY,
+                    bucket,
+                    pointsToSave,
+                    cached,
+                    Instant.now()
+            );
+            document.setProviderAccountKey(site.getProviderAccountKey());
+            document.setProviderAccountGroup(site.getProviderAccountGroup());
+            if (loadedPoints != null && !loadedPoints.isEmpty()) {
+                HistoryCollectionStateSupport.markSuccessful(document, Instant.now());
+            }
+            siteHistoryRepository.save(document);
+
+            return pointsToSave;
 
         } catch (Exception e) {
             if (cached != null) {
@@ -184,6 +231,68 @@ public class SolisHistorySyncService {
             );
             return List.of();
         }
+    }
+
+    private List<HistoryPointDto> clampMonthPoints(
+            SiteDocument site,
+            HistoryGranularity granularity,
+            String bucket,
+            List<HistoryPointDto> points
+    ) {
+        List<HistoryPointDto> safe = points != null ? points : List.of();
+
+        if (granularity != HistoryGranularity.MONTH) {
+            return safe;
+        }
+
+        return HistoryBackfillCompletenessSupport.clampMonthPointsToExpectedWindow(
+                site,
+                bucket,
+                safe,
+                LocalDate.now(TUNIS_ZONE),
+                maxLookbackMonths,
+                TUNIS_ZONE
+        );
+    }
+
+    private void logMonthSaveStatus(
+            SiteDocument site,
+            HistoryGranularity granularity,
+            String bucket,
+            List<HistoryPointDto> loadedPoints,
+            List<HistoryPointDto> savedPoints,
+            SiteHistoryDocument document
+    ) {
+        if (granularity != HistoryGranularity.MONTH) {
+            return;
+        }
+
+        HistoryBackfillCompletenessSupport.MonthCompleteness completeness =
+                HistoryBackfillCompletenessSupport.inspectMonth(
+                        site,
+                        document,
+                        bucket,
+                        LocalDate.now(TUNIS_ZONE),
+                        maxLookbackMonths,
+                        TUNIS_ZONE
+                );
+
+        log.info(
+                "Solis MONTH bucket saved site={} bucket={} loadedPoints={} savedPoints={} status={} collected={}/{} present={} missingDays={} zeroOrNullDays={} missingOrInvalid={} expectedRange={}..{}",
+                site.getSiteCode(),
+                bucket,
+                loadedPoints == null ? 0 : loadedPoints.size(),
+                savedPoints == null ? 0 : savedPoints.size(),
+                HistoryBackfillCompletenessSupport.monthStatusLabel(completeness),
+                completeness.collectedDays(),
+                completeness.expectedDays(),
+                completeness.presentDays(),
+                completeness.missingDays(),
+                completeness.invalidValueDays(),
+                completeness.missingOrInvalidDays(),
+                completeness.expectedStart(),
+                completeness.expectedEnd()
+        );
     }
 
     private void waitForHistoryProviderSlot() {
@@ -205,12 +314,29 @@ public class SolisHistorySyncService {
     }
 
     private boolean isHistoryFresh(
+            SiteDocument site,
             SiteHistoryDocument cached,
             HistoryGranularity granularity,
             String bucket
     ) {
         if (cached == null || cached.getLastSyncAt() == null) {
             return false;
+        }
+
+        if (granularity == HistoryGranularity.MONTH) {
+            return !HistoryBackfillCompletenessSupport.isMonthHistoryDue(
+                    site,
+                    cached,
+                    bucket,
+                    LocalDate.now(TUNIS_ZONE),
+                    maxLookbackMonths,
+                    86_400_000L,
+                    incompleteMonthRefreshMs,
+                    incompleteMonthRefreshMs,
+                    CURRENT_MONTH_HISTORY_TTL_MS,
+                    monthFinalizationGraceHours,
+                    TUNIS_ZONE
+            );
         }
 
         if (!isCurrentBucket(granularity, bucket)) {
@@ -255,7 +381,7 @@ public class SolisHistorySyncService {
     }
 
     private List<HistoryPointDto> safePoints(SiteHistoryDocument cached) {
-        return cached.getPoints() != null ? cached.getPoints() : List.of();
+        return cached != null && cached.getPoints() != null ? cached.getPoints() : List.of();
     }
 
     private void sleep(long millis) {

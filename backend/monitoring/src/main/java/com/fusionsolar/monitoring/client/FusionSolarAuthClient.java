@@ -4,6 +4,7 @@ import com.fusionsolar.monitoring.dto.LoginRequest;
 import com.fusionsolar.monitoring.dto.LoginResponse;
 import com.fusionsolar.monitoring.service.huawei.HuaweiAccountDirectory;
 import com.fusionsolar.monitoring.service.huawei.HuaweiApiRateLimiter;
+import com.fusionsolar.monitoring.service.huawei.HuaweiApiDeferredException;
 import com.fusionsolar.monitoring.service.huawei.HuaweiAccountDirectory.HuaweiAccount;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpEntity;
@@ -23,7 +24,13 @@ public class FusionSolarAuthClient {
 
     private final HuaweiAccountDirectory huaweiAccountDirectory;
     private final HuaweiApiRateLimiter rateLimiter;
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate = createRestTemplate();
+    private static RestTemplate createRestTemplate() {
+        var factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(15000);
+        factory.setReadTimeout(30000);
+        return new RestTemplate(factory);
+    }
 
     public LoginResult login() {
         return login(huaweiAccountDirectory.primaryAccountKey());
@@ -44,7 +51,14 @@ public class FusionSolarAuthClient {
         HttpEntity<LoginRequest> request = new HttpEntity<>(requestBody, headers);
 
         String endpoint = "/thirdData/login";
-        rateLimiter.awaitSlot(account.key(), endpoint);
+        long retryAfterMs = rateLimiter.tryReserveSlot(account.key(), endpoint);
+        if (retryAfterMs > 0L) {
+            throw new HuaweiApiDeferredException(
+                    "FusionSolar login deferred for account=" + account.key()
+                            + " retryAfterMs=" + retryAfterMs,
+                    retryAfterMs
+            );
+        }
 
         try {
             ResponseEntity<LoginResponse> response = restTemplate.exchange(

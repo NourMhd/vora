@@ -39,6 +39,8 @@ public class SolisCloudClient {
     private static final String STATION_LIST = "/v1/api/userStationList";
     private static final String STATION_DETAIL = "/v1/api/stationDetail";
     private static final String STATION_DAY_ENERGY = "/v1/api/stationDayEnergyList";
+    private static final String STATION_MONTH = "/v1/api/stationMonth";
+    private static final String STATION_YEAR = "/v1/api/stationYear";
     private static final String STATION_MONTH_ENERGY = "/v1/api/stationMonthEnergyList";
     private static final String STATION_YEAR_ENERGY = "/v1/api/stationYearEnergyList";
     private static final String INVERTER_LIST = "/v1/api/inverterList";
@@ -76,7 +78,13 @@ public class SolisCloudClient {
     private final ProvidersProperties providersProperties;
     private final ObjectMapper objectMapper;
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate = createRestTemplate();
+    private static RestTemplate createRestTemplate() {
+        var factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(15000);
+        factory.setReadTimeout(30000);
+        return new RestTemplate(factory);
+    }
 
     private final Map<String, Long> lastEndpointCallAt = new HashMap<>();
     private final Map<String, Long> endpointBlockedUntil = new HashMap<>();
@@ -286,7 +294,7 @@ public class SolisCloudClient {
     }
 
     private long globalDelayMs(String path) {
-        if (STATION_YEAR_ENERGY.equals(path)) {
+        if (STATION_YEAR.equals(path) || STATION_YEAR_ENERGY.equals(path)) {
             return SOLIS_YEAR_PRE_CALL_DELAY_MS;
         }
 
@@ -326,10 +334,11 @@ public class SolisCloudClient {
 
     private long endpointDelayMs(String path) {
         return switch (path) {
-            case STATION_YEAR_ENERGY -> SOLIS_YEAR_ENDPOINT_DELAY_MS;
+            case STATION_YEAR, STATION_YEAR_ENERGY -> SOLIS_YEAR_ENDPOINT_DELAY_MS;
             case STATION_LIST,
                  STATION_DETAIL,
                  STATION_DAY_ENERGY,
+                 STATION_MONTH,
                  STATION_MONTH_ENERGY,
                  INVERTER_LIST -> SOLIS_SAFE_DELAY_MS;
             default -> SOLIS_SAFE_DELAY_MS;

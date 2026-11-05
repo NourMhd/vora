@@ -15,9 +15,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.Year;
 import java.time.YearMonth;
 import java.time.ZoneId;
@@ -47,9 +49,8 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
     private static final String DEVICE_LIST = "/v1/device/list";
 
     /*
-     * Growatt refuse parfois une plage mensuelle complète, par exemple:
-     * 2026-05-01 -> 2026-05-31 avec time_unit=day.
-     * On découpe donc les mois en petites plages pour éviter error_time format is incorrect.
+     * Growatt refuse parfois une plage mensuelle complète,
+     * donc on découpe le mois en petites plages.
      */
     private static final int MONTH_ENERGY_CHUNK_DAYS = 7;
 
@@ -63,70 +64,115 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
 
     @Override
     public List<SiteSummaryDto> getSitesSummary() {
-        Map<String, SiteSummaryDto> sites = new LinkedHashMap<>();
+        InventorySnapshot snapshot = getSitesInventory();
+        if (!snapshot.failedAccountGroups().isEmpty())
+            throw new IllegalStateException("Growatt inventory incomplete for accounts: " + snapshot.failedAccountGroups());
+        return snapshot.sites();
+    }
+
+    /** Only fully enumerated accounts may confirm missing sites. */
+    public InventorySnapshot getSitesInventory() {
+        List<SiteSummaryDto> sites = new ArrayList<>();
+        java.util.Set<String> completed = new java.util.HashSet<>();
+        java.util.Set<String> failed = new java.util.HashSet<>();
         List<ProvidersProperties.HuaweiAccountProperties> accounts = enabledAccounts();
-
-        log.info("Growatt sites summary sync started accounts={}", accounts.size());
-
-        for (ProvidersProperties.HuaweiAccountProperties account : accounts) {
-            int page = 1;
-            int perPage = 100;
-
-            while (page <= 100) {
-                JsonNode data = growattCloudClient.get(
-                        account,
-                        PLANT_LIST,
-                        Map.of("page", page, "perpage", perPage)
-                );
-
-                List<JsonNode> plants = collectArray(data.path("plants"));
-                log.info("Growatt plants loaded account={} page={} count={}", safeKey(account), page, plants.size());
-
-                if (plants.isEmpty()) {
-                    break;
-                }
-
-                for (JsonNode plant : plants) {
-                    JsonNode enriched = plant;
-                    String plantId = text(plant, "plant_id", "plantId", "id");
-
-                    if (!isBlank(plantId)) {
-                        try {
-                            JsonNode realtime = growattCloudClient.get(
-                                    account,
-                                    PLANT_DATA,
-                                    Map.of("plant_id", plantId)
-                            );
-                            enriched = merge(plant.deepCopy(), realtime);
-                        } catch (Exception e) {
-                            log.debug(
-                                    "Growatt /plant/data skipped account={} plantId={} cause={}",
-                                    safeKey(account),
-                                    plantId,
-                                    e.getMessage()
-                            );
-                        }
-                    }
-
-                    SiteSummaryDto site = toSiteSummary(account, enriched);
-
-                    if (site.getSiteCode() != null && !site.getSiteCode().isBlank()) {
-                        sites.put(site.getSiteCode(), site);
-                    }
-                }
-
-                int count = data.path("count").asInt(plants.size());
-
-                if (plants.size() < perPage || page * perPage >= count) {
-                    break;
-                }
-
-                page++;
+        if (accounts.isEmpty()) throw new IllegalStateException("No enabled Growatt source configured");
+        java.util.Set<String> configured = new java.util.HashSet<>();
+        for (var account : accounts) {
+            if (!configured.add(safeKey(account)))
+                throw new IllegalStateException("Duplicate Growatt account group: " + safeKey(account));
+        }
+        for (var account : accounts) {
+            try {
+                sites.addAll(loadAccountInventory(account));
+                completed.add(safeKey(account));
+            } catch (Exception e) {
+                failed.add(safeKey(account));
+                log.warn("Growatt inventory failed account={}: {}", safeKey(account), e.getMessage());
             }
         }
+        return new InventorySnapshot(List.copyOf(sites), java.util.Set.copyOf(completed), java.util.Set.copyOf(failed));
+    }
 
-        log.info("Growatt sites summary sync finished sites={}", sites.size());
+    private List<SiteSummaryDto> loadAccountInventory(ProvidersProperties.HuaweiAccountProperties account) {
+        Map<String, SiteSummaryDto> sites = new LinkedHashMap<>();
+        int page = 1;
+        int perPage = 100;
+        int receivedForAccount = 0;
+
+        while (page <= 100) {
+            JsonNode data = growattCloudClient.get(
+                    account,
+                    PLANT_LIST,
+                    Map.of("page", page, "perpage", perPage)
+            );
+
+            com.fusionsolar.monitoring.provider.ProviderInventoryPage inventoryPage =
+                    com.fusionsolar.monitoring.provider.ProviderInventoryPage.parse(data,
+                            "plants", "list", "records", "rows", "datas");
+            List<JsonNode> plants = inventoryPage.records();
+            receivedForAccount += plants.size();
+            log.info("Growatt plants loaded account={} page={} count={}", safeKey(account), page, plants.size());
+
+            if (plants.isEmpty()) {
+                inventoryPage.hasNext(receivedForAccount, perPage);
+                break;
+            }
+
+            for (JsonNode plant : plants) {
+                JsonNode enriched = plant;
+                boolean liveDataFailed = false;
+                String plantId = text(plant, "plant_id", "plantId", "id");
+
+                if (isBlank(plantId)) throw new IllegalStateException("Growatt inventory contains invalid site identity");
+                if (!isBlank(plantId)) {
+                    try {
+                        JsonNode realtime = growattCloudClient.get(
+                                account,
+                                PLANT_DATA,
+                                Map.of("plant_id", plantId)
+                        );
+                        enriched = merge(plant.deepCopy(), realtime);
+                    } catch (Exception e) {
+                        liveDataFailed = true;
+                        log.warn(
+                                "Growatt /plant/data skipped account={} plantId={} cause={}",
+                                safeKey(account),
+                                plantId,
+                                e.getMessage()
+                        );
+                    }
+                }
+
+                SiteSummaryDto site = toSiteSummary(account, enriched);
+                // Inventory identity must not be overwritten by realtime payload fields.
+                site.setSiteCode("GROWATT_" + safeKey(account) + "_" + plantId);
+                if (liveDataFailed) site.setStatus("unknown");
+
+                if (site.getSiteCode() != null && !site.getSiteCode().isBlank()) {
+                    if (sites.putIfAbsent(site.getSiteCode(), site) != null)
+                        throw new IllegalStateException("Growatt repeated site in paginated inventory");
+                } else {
+                    throw new IllegalStateException("Growatt inventory contains invalid site identity");
+                }
+            }
+
+            if (!inventoryPage.hasNext(receivedForAccount, perPage)) {
+                break;
+            }
+
+            if (page == 100) throw new IllegalStateException("Growatt inventory pagination limit exceeded");
+            page++;
+        }
         return new ArrayList<>(sites.values());
+    }
+
+    public record InventorySnapshot(List<SiteSummaryDto> sites,
+                                    java.util.Set<String> completedAccountGroups,
+                                    java.util.Set<String> failedAccountGroups) {}
+
+    public String inventoryAccountGroup(String siteCode) {
+        return safeKey(parseSiteCode(siteCode).account());
     }
 
     @Override
@@ -156,20 +202,93 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
         AccountAndPlant ref = parseSiteCode(siteCode);
         Range range = rangeFor(type, value);
 
+        /*
+         * DAY = courbe horaire de puissance kW.
+         * Source: /v1/plant/power
+         */
         if ("day".equals(range.requestType())) {
             return getDayPowerHistory(ref, range.start());
         }
 
         /*
-         * Correction principale:
-         * Pour MONTH, on ne fait plus un seul appel 2026-05-01 -> 2026-05-31.
-         * On découpe en chunks de 7 jours.
+         * MONTH = courbe énergie kWh par jour.
+         * Source: /v1/plant/energy, découpé en chunks.
          */
         if ("month".equals(range.requestType())) {
             return getMonthEnergyHistory(ref, range.start(), range.end());
         }
 
+        /*
+         * YEAR / YEARLY = énergie kWh par mois/année.
+         */
         return getEnergyHistory(ref, range);
+    }
+
+    private List<HistoryPointDto> getDayPowerHistory(AccountAndPlant ref, LocalDate date) {
+        Map<String, Object> params = new LinkedHashMap<>();
+        params.put("plant_id", ref.plantId());
+        params.put("date", date.toString());
+        params.put("timezone_id", 1);
+
+        JsonNode data = growattCloudClient.get(ref.account(), PLANT_POWER, params);
+
+        List<JsonNode> records = collectArrayFlexible(
+                data,
+                "powers",
+                "power",
+                "data",
+                "list",
+                "records",
+                "rows"
+        );
+
+        log.info(
+                "Growatt day power loaded account={} plant={} date={} records={}",
+                safeKey(ref.account()),
+                ref.plantId(),
+                date,
+                records.size()
+        );
+
+        if (log.isDebugEnabled() && !records.isEmpty()) {
+            log.debug("Growatt day power sample account={} plant={} date={} sample={}",
+                    safeKey(ref.account()), ref.plantId(), date, oneLineNode(records.get(0)));
+        }
+
+        List<HistoryPointDto> points = new ArrayList<>();
+
+        for (JsonNode power : records) {
+            String time = text(
+                    power,
+                    "time",
+                    "date",
+                    "data_time",
+                    "dataTime",
+                    "timestamp",
+                    "collectTime",
+                    "timeStr",
+                    "xAxis",
+                    "label"
+            );
+
+            Double valueKw = firstPowerKw(
+                    power,
+                    "power",
+                    "pac",
+                    "p",
+                    "current_power",
+                    "currentPower",
+                    "value"
+            );
+
+            Long collectTime = toEpochMillis(time, "day", date);
+
+            if (collectTime != null && valueKw != null && valueKw >= 0) {
+                points.add(new HistoryPointDto(collectTime, round2(valueKw)));
+            }
+        }
+
+        return deduplicateAndSort(points);
     }
 
     private List<HistoryPointDto> getMonthEnergyHistory(AccountAndPlant ref, LocalDate start, LocalDate end) {
@@ -197,7 +316,6 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
             );
 
             points.addAll(getEnergyHistory(ref, chunkRange));
-
             cursor = chunkEnd.plusDays(1);
         }
 
@@ -213,13 +331,51 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
         params.put("page", 1);
         params.put("perpage", Math.max(1, range.perPage()));
 
-        JsonNode data = growattCloudClient.get(ref.account(), PLANT_ENERGY, params);
+        List<JsonNode> records = new ArrayList<>();
+        String previousPage = null;
+        for (int page = 1; page <= 1000; page++) {
+            params.put("page", page);
+            JsonNode data = growattCloudClient.get(ref.account(), PLANT_ENERGY, params);
+            List<JsonNode> items = collectArrayFlexible(data, "energys", "energies", "energy", "list", "records", "rows");
+            if (items.isEmpty()) break;
+            String fingerprint = items.toString();
+            if (fingerprint.equals(previousPage))
+                throw new IllegalStateException("Growatt repeated history page; pagination not supported for this response");
+            previousPage = fingerprint;
+            records.addAll(items);
+            int total = data.path("count").asInt(-1);
+            if (total < 0) total = data.path("total").asInt(-1);
+            if (total >= 0 && records.size() >= total) break;
+            if (total < 0 && items.size() < Math.max(1, range.perPage())) break;
+            if (page == 1000) throw new IllegalStateException("Growatt history pagination limit exceeded");
+        }
+
+        log.debug(
+                "Growatt energy loaded account={} plant={} type={} start={} end={} records={}",
+                safeKey(ref.account()),
+                ref.plantId(),
+                range.requestType(),
+                range.start(),
+                range.end(),
+                records.size()
+        );
 
         List<HistoryPointDto> points = new ArrayList<>();
 
-        for (JsonNode energy : collectArrayFlexible(data, "energys", "energies", "energy")) {
-            String date = text(energy, "date", "time", "day", "month", "year");
-            Double valueKwh = number(
+        for (JsonNode energy : records) {
+            String date = text(
+                    energy,
+                    "date",
+                    "time",
+                    "day",
+                    "month",
+                    "year",
+                    "data_time",
+                    "dataTime",
+                    "timestamp"
+            );
+
+            Double valueKwh = firstEnergyKwh(
                     energy,
                     "energy",
                     "value",
@@ -227,40 +383,16 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
                     "kwh",
                     "eToday",
                     "eMonth",
-                    "eYear"
+                    "eYear",
+                    "today_energy",
+                    "month_energy",
+                    "year_energy"
             );
 
-            Long collectTime = toEpochMillis(date, range.timeUnit());
+            Long collectTime = toEpochMillis(date, range.timeUnit(), null);
 
             if (collectTime != null && valueKwh != null && valueKwh >= 0) {
                 points.add(new HistoryPointDto(collectTime, round2(valueKwh)));
-            }
-        }
-
-        return deduplicateAndSort(points);
-    }
-
-    private List<HistoryPointDto> getDayPowerHistory(AccountAndPlant ref, LocalDate date) {
-        JsonNode data = growattCloudClient.get(
-                ref.account(),
-                PLANT_POWER,
-                Map.of(
-                        "plant_id", ref.plantId(),
-                        "date", date.toString(),
-                        "timezone_id", 1
-                )
-        );
-
-        List<HistoryPointDto> points = new ArrayList<>();
-
-        for (JsonNode power : collectArrayFlexible(data, "powers", "power")) {
-            String time = text(power, "time", "date", "data_time", "timestamp");
-            Double value = number(power, "power", "value", "pac", "p");
-
-            Long collectTime = toEpochMillis(time, "day");
-
-            if (collectTime != null && value != null && value >= 0) {
-                points.add(new HistoryPointDto(collectTime, round2(value)));
             }
         }
 
@@ -302,17 +434,17 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
 
         List<DeviceItemDto> devices = new ArrayList<>();
 
-        for (JsonNode node : collectArray(data.path("devices"))) {
+        for (JsonNode node : collectArrayFlexible(data, "devices", "list", "records", "rows")) {
             DeviceItemDto device = new DeviceItemDto();
 
-            device.setId(text(node, "device_id", "device_sn", "sn"));
-            device.setDevDn(text(node, "device_sn", "sn", "device_id"));
-            device.setDevName(text(node, "device_sn", "alias", "model"));
+            device.setId(text(node, "device_id", "deviceId", "device_sn", "sn"));
+            device.setDevDn(text(node, "device_sn", "sn", "device_id", "deviceId"));
+            device.setDevName(text(node, "device_name", "deviceName", "device_sn", "alias", "model"));
             device.setStationCode(siteCode);
             device.setEsnCode(text(node, "device_sn", "sn"));
-            device.setDevTypeId(integer(node, "type", "device_type"));
+            device.setDevTypeId(integer(node, "type", "device_type", "deviceType"));
             device.setModel(text(node, "model", "manufacturer"));
-            device.setInvType(text(node, "manufacturer", "type"));
+            device.setInvType(text(node, "manufacturer", "type", "device_type"));
 
             devices.add(device);
         }
@@ -325,7 +457,8 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
             throw new IllegalArgumentException("Invalid Growatt site code: " + siteCode);
         }
 
-        for (ProvidersProperties.HuaweiAccountProperties account : enabledAccounts()) {
+        for (ProvidersProperties.HuaweiAccountProperties account : enabledAccounts().stream()
+                .sorted(Comparator.comparingInt((ProvidersProperties.HuaweiAccountProperties a) -> safeKey(a).length()).reversed()).toList()) {
             String prefix = "GROWATT_" + safeKey(account) + "_";
 
             if (siteCode.startsWith(prefix)) {
@@ -355,12 +488,12 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
                 siteCode,
                 text(node, "name", "plant_name", "plantName"),
                 toStatus(text(node, "status")),
-                nonNegative(number(node, "peak_power", "capacity", "installedPowerKw")),
+                nonNegative(firstPowerKw(node, "peak_power", "capacity", "installedPowerKw")),
                 text(node, "create_date", "gridConnectionDate", "createDate"),
-                nonNegative(number(node, "today_energy", "todayEnergy", "dayEnergyKwh")),
-                nonNegative(number(node, "month_energy", "monthly_energy", "monthEnergyKwh")),
-                nonNegative(number(node, "year_energy", "yearly_energy", "yearEnergyKwh")),
-                nonNegative(number(node, "total_energy", "totalEnergy", "totalEnergyKwh")),
+                nonNegative(firstEnergyKwh(node, "today_energy", "todayEnergy", "dayEnergyKwh")),
+                nonNegative(firstEnergyKwh(node, "month_energy", "monthly_energy", "monthEnergyKwh")),
+                nonNegative(firstEnergyKwh(node, "year_energy", "yearly_energy", "yearEnergyKwh")),
+                nonNegative(firstEnergyKwh(node, "total_energy", "totalEnergy", "totalEnergyKwh")),
                 null
         );
     }
@@ -511,24 +644,55 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
         return new ArrayList<>(byTime.values());
     }
 
-    private Long toEpochMillis(String value, String timeUnit) {
+    private Long toEpochMillis(String value, String timeUnit, LocalDate fallbackDate) {
         if (isBlank(value)) {
             return null;
         }
 
         String raw = value.trim();
 
+        Long numericEpoch = parseEpochMillis(raw);
+        if (numericEpoch != null) {
+            return numericEpoch;
+        }
+
         try {
             if (raw.matches("^\\d{4}-\\d{2}-\\d{2}$")) {
-                return LocalDate.parse(raw).atStartOfDay(TUNIS_ZONE).toInstant().toEpochMilli();
+                return LocalDate.parse(raw)
+                        .atStartOfDay(TUNIS_ZONE)
+                        .toInstant()
+                        .toEpochMilli();
+            }
+
+            if (raw.matches("^\\d{4}/\\d{2}/\\d{2}$")) {
+                return LocalDate.parse(raw, DateTimeFormatter.ofPattern("yyyy/MM/dd"))
+                        .atStartOfDay(TUNIS_ZONE)
+                        .toInstant()
+                        .toEpochMilli();
             }
 
             if (raw.matches("^\\d{4}-\\d{2}$")) {
-                return YearMonth.parse(raw).atDay(1).atStartOfDay(TUNIS_ZONE).toInstant().toEpochMilli();
+                return YearMonth.parse(raw)
+                        .atDay(1)
+                        .atStartOfDay(TUNIS_ZONE)
+                        .toInstant()
+                        .toEpochMilli();
             }
 
             if (raw.matches("^\\d{4}$")) {
-                return LocalDate.of(Integer.parseInt(raw), 1, 1).atStartOfDay(TUNIS_ZONE).toInstant().toEpochMilli();
+                return LocalDate.of(Integer.parseInt(raw), 1, 1)
+                        .atStartOfDay(TUNIS_ZONE)
+                        .toInstant()
+                        .toEpochMilli();
+            }
+
+            LocalTime localTime = parseTimeOfDay(raw);
+            if (localTime != null && fallbackDate != null) {
+                return fallbackDate
+                        .atTime(localTime)
+                        .atZone(TUNIS_ZONE)
+                        .toInstant()
+                        .toEpochMilli();
             }
 
             try {
@@ -546,18 +710,95 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
             List<DateTimeFormatter> formatters = List.of(
                     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
                     DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss"),
+                    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"),
+                    DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm"),
                     DateTimeFormatter.ISO_LOCAL_DATE_TIME
             );
 
             for (DateTimeFormatter formatter : formatters) {
                 try {
-                    return LocalDateTime.parse(raw, formatter).atZone(TUNIS_ZONE).toInstant().toEpochMilli();
+                    return LocalDateTime.parse(raw, formatter)
+                            .atZone(TUNIS_ZONE)
+                            .toInstant()
+                            .toEpochMilli();
                 } catch (DateTimeParseException ignored) {
                     // Continue.
                 }
             }
+
+            if ("day".equals(timeUnit) && raw.matches("^\\d{1,2}$") && fallbackDate != null) {
+                int hour = Math.max(0, Math.min(23, Integer.parseInt(raw)));
+                return fallbackDate
+                        .atTime(hour, 0)
+                        .atZone(TUNIS_ZONE)
+                        .toInstant()
+                        .toEpochMilli();
+            }
+
         } catch (Exception ignored) {
             // Return null below.
+        }
+
+        return null;
+    }
+
+    private Long parseEpochMillis(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+
+        String trimmed = raw.trim();
+
+        if (!trimmed.matches("^-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$")) {
+            return null;
+        }
+
+        try {
+            long epoch = new BigDecimal(trimmed).longValue();
+            long abs = Math.abs(epoch);
+
+            if (abs < 1_000_000_000L) {
+                return null;
+            }
+
+            if (abs >= 10_000_000_000_000_000L) {
+                return epoch / 1_000_000L;
+            }
+
+            if (abs >= 100_000_000_000_000L) {
+                return epoch / 1_000L;
+            }
+
+            if (abs < 10_000_000_000L) {
+                return epoch * 1_000L;
+            }
+
+            return epoch;
+        } catch (NumberFormatException | ArithmeticException ignored) {
+            return null;
+        }
+    }
+
+    private LocalTime parseTimeOfDay(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+
+        String text = raw.trim();
+
+        List<DateTimeFormatter> formatters = List.of(
+                DateTimeFormatter.ofPattern("H:mm:ss"),
+                DateTimeFormatter.ofPattern("HH:mm:ss"),
+                DateTimeFormatter.ofPattern("H:mm"),
+                DateTimeFormatter.ofPattern("HH:mm")
+        );
+
+        for (DateTimeFormatter formatter : formatters) {
+            try {
+                return LocalTime.parse(text, formatter);
+            } catch (DateTimeParseException ignored) {
+                // Continue.
+            }
         }
 
         return null;
@@ -614,23 +855,61 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
     }
 
     private List<JsonNode> collectArrayFlexible(JsonNode parent, String... names) {
+        List<JsonNode> result = new ArrayList<>();
+
         if (parent == null || parent.isMissingNode() || parent.isNull()) {
-            return List.of();
+            return result;
         }
 
         if (parent.isArray()) {
             return collectArray(parent);
         }
 
+        collectNamedArrays(result, parent, names);
+
+        JsonNode data = parent.path("data");
+        if (!data.isMissingNode() && !data.isNull()) {
+            if (data.isArray()) {
+                result.addAll(collectArray(data));
+            } else if (data.isObject()) {
+                collectNamedArrays(result, data, names);
+            }
+        }
+
+        JsonNode page = parent.path("page");
+        if (!page.isMissingNode() && !page.isNull() && page.isObject()) {
+            collectNamedArrays(result, page, names);
+        }
+
+        if (result.isEmpty()) {
+            JsonNode datas = parent.path("datas");
+            if (datas.isArray()) {
+                result.addAll(collectArray(datas));
+            }
+        }
+
+        if (result.isEmpty()) {
+            JsonNode rows = parent.path("rows");
+            if (rows.isArray()) {
+                result.addAll(collectArray(rows));
+            }
+        }
+
+        return result;
+    }
+
+    private void collectNamedArrays(List<JsonNode> result, JsonNode parent, String... names) {
+        if (parent == null || !parent.isObject()) {
+            return;
+        }
+
         for (String name : names) {
             JsonNode candidate = parent.path(name);
 
             if (candidate != null && candidate.isArray()) {
-                return collectArray(candidate);
+                candidate.forEach(result::add);
             }
         }
-
-        return List.of();
     }
 
     private String text(JsonNode node, String... names) {
@@ -653,23 +932,189 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
         return null;
     }
 
+    private Double firstEnergyKwh(JsonNode node, String... names) {
+        for (String name : names) {
+            JsonNode valueNode = node.path(name);
+
+            if (valueNode.isMissingNode() || valueNode.isNull()) {
+                continue;
+            }
+
+            String rawText = valueNode.asText(null);
+            Double value = valueNode.isNumber() ? valueNode.asDouble() : parseNumber(rawText);
+
+            if (value == null) {
+                continue;
+            }
+
+            String unit = text(
+                    node,
+                    name + "_unit",
+                    name + "Unit",
+                    name + "unit",
+                    name + "_str",
+                    name + "Str",
+                    "unit",
+                    "energyUnit",
+                    "energy_unit",
+                    "dataUnit"
+            );
+
+            return round2(toKwh(value, unit != null ? unit : rawText));
+        }
+
+        return null;
+    }
+
+    private Double firstPowerKw(JsonNode node, String... names) {
+        for (String name : names) {
+            JsonNode valueNode = node.path(name);
+
+            if (valueNode.isMissingNode() || valueNode.isNull()) {
+                continue;
+            }
+
+            String rawText = valueNode.asText(null);
+            Double value = valueNode.isNumber() ? valueNode.asDouble() : parseNumber(rawText);
+
+            if (value == null) {
+                continue;
+            }
+
+            String unit = text(
+                    node,
+                    name + "_unit",
+                    name + "Unit",
+                    name + "unit",
+                    name + "_str",
+                    name + "Str",
+                    "unit",
+                    "powerUnit",
+                    "power_unit",
+                    "dataUnit"
+            );
+
+            return round2(toKw(value, unit != null ? unit : rawText));
+        }
+
+        return null;
+    }
+
     private Double number(JsonNode node, String... names) {
-        String value = text(node, names);
+        for (String name : names) {
+            JsonNode value = node.path(name);
 
-        if (isBlank(value)) {
-            return null;
+            if (!value.isMissingNode() && !value.isNull()) {
+                if (value.isNumber()) {
+                    return value.asDouble();
+                }
+
+                Double parsed = parseNumber(value.asText(null));
+
+                if (parsed != null) {
+                    return parsed;
+                }
+            }
         }
 
-        try {
-            return Double.parseDouble(value.replace(",", "."));
-        } catch (NumberFormatException e) {
-            return null;
-        }
+        return null;
     }
 
     private Integer integer(JsonNode node, String... names) {
         Double value = number(node, names);
         return value == null ? null : value.intValue();
+    }
+
+    private Double parseNumber(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+
+        String text = raw.trim()
+                .replace("\u00A0", "")
+                .replace(" ", "");
+
+        if (text.contains(",") && text.contains(".")) {
+            text = text.replace(",", "");
+        } else if (text.contains(",")) {
+            text = text.replace(",", ".");
+        }
+
+        text = text.replaceAll("[^0-9.\\-]", "");
+
+        if (text.isBlank() || "-".equals(text) || ".".equals(text)) {
+            return null;
+        }
+
+        try {
+            return Double.parseDouble(text);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private Double toKwh(Double value, String unitText) {
+        if (value == null) {
+            return null;
+        }
+
+        if (unitText == null || unitText.isBlank()) {
+            return value;
+        }
+
+        String normalized = unitText.trim()
+                .toLowerCase(Locale.ROOT)
+                .replace(" ", "")
+                .replace("·", "")
+                .replace("/", "");
+
+        if (normalized.contains("gwh")) {
+            return value * 1_000_000.0;
+        }
+
+        if (normalized.contains("mwh")) {
+            return value * 1_000.0;
+        }
+
+        if (normalized.contains("kwh") || normalized.contains("kw·h")) {
+            return value;
+        }
+
+        if (normalized.contains("wh") && !normalized.contains("kwh") && !normalized.contains("mwh")) {
+            return value / 1_000.0;
+        }
+
+        return value;
+    }
+
+    private Double toKw(Double value, String unitText) {
+        if (value == null) {
+            return null;
+        }
+
+        if (unitText == null || unitText.isBlank()) {
+            return value;
+        }
+
+        String normalized = unitText.trim()
+                .toLowerCase(Locale.ROOT)
+                .replace(" ", "")
+                .replace("·", "")
+                .replace("/", "");
+
+        if (normalized.contains("mw")) {
+            return value * 1_000.0;
+        }
+
+        if (normalized.contains("kw")) {
+            return value;
+        }
+
+        if (normalized.contains("w") && !normalized.contains("kw") && !normalized.contains("mw")) {
+            return value / 1_000.0;
+        }
+
+        return value;
     }
 
     private Double nonNegative(Double value) {
@@ -680,6 +1125,24 @@ public class GrowattMonitoringProvider implements MonitoringProvider {
 
     private Double round2(Double value) {
         return value == null ? null : Math.round(value * 100.0) / 100.0;
+    }
+
+    private String oneLineNode(JsonNode node) {
+        if (node == null) {
+            return "";
+        }
+
+        String text = node.toString()
+                .replace("\r", " ")
+                .replace("\n", " ")
+                .replace("\t", " ")
+                .trim();
+
+        if (text.length() > 1200) {
+            return text.substring(0, 1200) + "...";
+        }
+
+        return text;
     }
 
     private boolean isBlank(String value) {
