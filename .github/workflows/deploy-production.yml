@@ -1,0 +1,115 @@
+name: Deploiement Multi Vora
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: 'Numero dans URL actions/runs/... de la CI reussie sur main'
+        required: true
+        type: string
+      mode:
+        description: 'prepare = controles seuls ; deploy = installation avec interruption'
+        required: true
+        default: prepare
+        type: choice
+        options: [prepare, deploy]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: vora-production
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+      run_id: ${{ steps.check.outputs.run_id }}
+    steps:
+      - name: Valider la livraison CI
+        id: check
+        uses: actions/github-script@v8
+        env:
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        with:
+          script: |
+            const id = process.env.CI_RUN_ID.trim();
+            if (!/^\d+$/.test(id) || !Number.isSafeInteger(Number(id))) {
+              throw new Error('Numero de run invalide');
+            }
+            const repo = context.repo;
+            const {data: run} = await github.rest.actions.getWorkflowRun({...repo, run_id: Number(id)});
+            if (run.status !== 'completed' || run.conclusion !== 'success' ||
+                run.head_branch !== 'main' || run.event !== 'push' ||
+                run.path !== '.github/workflows/ci.yml' ||
+                run.head_repository?.full_name?.toLowerCase() !== `${repo.owner}/${repo.repo}`.toLowerCase()) {
+              throw new Error('Selectionner une CI ci.yml reussie, declenchee par push sur main dans ce depot');
+            }
+            const {data: comparison} = await github.rest.repos.compareCommitsWithBasehead({
+              ...repo, basehead: `${run.head_sha}...main`
+            });
+            if (!['ahead', 'identical'].includes(comparison.status)) {
+              throw new Error('Le commit CI ne fait pas partie de main');
+            }
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              ...repo, run_id: Number(id), per_page: 100
+            });
+            for (const name of [`backend-jar-${run.head_sha}`, `frontend-web-${run.head_sha}`]) {
+              if (artifacts.filter(a => a.name === name && !a.expired).length !== 1) {
+                throw new Error(`Artefact manquant ou expire : ${name}. Relancer la CI.`);
+              }
+            }
+            core.setOutput('sha', run.head_sha);
+            core.setOutput('run_id', id);
+            await core.summary.addHeading('Livraison selectionnee')
+              .addRaw(`Commit : ${run.head_sha}\nCI : ${run.html_url}\n`).write();
+
+  production:
+    needs: validate
+    runs-on: [self-hosted, Windows, X64, vora-production]
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: powershell
+    env:
+      PACKAGE_ROOT: ${{ runner.temp }}\vora-${{ github.run_id }}-${{ github.run_attempt }}
+      DELIVERY_SHA: ${{ needs.validate.outputs.sha }}
+      DEPLOY_MODE: ${{ inputs.mode }}
+    steps:
+      - name: Recuperer le script de cette execution
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: deploy
+      - name: Recuperer le JAR valide
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-jar-${{ needs.validate.outputs.sha }}
+          path: ${{ env.PACKAGE_ROOT }}\backend
+          run-id: ${{ needs.validate.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Recuperer le frontend de la meme CI
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-web-${{ needs.validate.outputs.sha }}
+          path: ${{ env.PACKAGE_ROOT }}\frontend
+          run-id: ${{ needs.validate.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Preparer ou deployer la livraison
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $apply = $env:DEPLOY_MODE -eq 'deploy'
+          & '.\deploy\deploy-vora.ps1' -PackageRoot $env:PACKAGE_ROOT -Commit $env:DELIVERY_SHA -Execute:$apply
+          if ($LASTEXITCODE -ne 0) { throw "Echec du script : $LASTEXITCODE" }
+      - name: Nettoyer les fichiers temporaires
+        if: always()
+        run: |
+          if (Test-Path -LiteralPath $env:PACKAGE_ROOT) {
+            Remove-Item -LiteralPath $env:PACKAGE_ROOT -Recurse -Force
+          }
