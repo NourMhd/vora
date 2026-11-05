@@ -77,10 +77,13 @@ jobs:
       run:
         shell: powershell
     env:
-      PACKAGE_ROOT: ${{ runner.temp }}\vora-${{ github.run_id }}-${{ github.run_attempt }}
       DELIVERY_SHA: ${{ needs.validate.outputs.sha }}
       DEPLOY_MODE: ${{ inputs.mode }}
     steps:
+      - name: Definir le dossier temporaire
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP ("vora-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT)
+          "PACKAGE_ROOT=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Recuperer le script de cette execution
         uses: actions/checkout@v6
         with:
@@ -110,6 +113,6 @@ jobs:
       - name: Nettoyer les fichiers temporaires
         if: always()
         run: |
-          if (Test-Path -LiteralPath $env:PACKAGE_ROOT) {
+          if ($env:PACKAGE_ROOT -and (Test-Path -LiteralPath $env:PACKAGE_ROOT)) {
             Remove-Item -LiteralPath $env:PACKAGE_ROOT -Recurse -Force
           }
