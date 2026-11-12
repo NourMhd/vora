@@ -167,8 +167,8 @@ public class PerformanceReportService {
         LocalDate swapDate = site.getSwapDate();
         LocalDate commissioningDate = parseFlexibleDate(site.getGridConnectionDate());
 
-        LocalDate productionStart = swapDate != null
-                ? maxDate(range.startDate(), swapDate)
+        LocalDate productionStart = commissioningDate != null
+                ? maxDate(range.startDate(), commissioningDate)
                 : null;
         LocalDate productionEnd = effectiveFilterEnd;
 
@@ -454,7 +454,7 @@ public class PerformanceReportService {
                 governorate,
                 zone,
                 site != null ? safeDouble(site.getInstalledPowerKw()) : 0.0,
-                site != null ? site.getSwapDate() : null,
+                site != null ? parseFlexibleDate(site.getGridConnectionDate()) : null,
                 valuesByDate,
                 presentDates
         );
@@ -629,7 +629,7 @@ public class PerformanceReportService {
     private Double sanitizeHistoryValue(SiteDocument site, Double value) {
         Double actual = realKpiOrNull(value);
         if (actual == null) {
-            return 0.0;
+            return null;
         }
 
         if (site.getBrand() == Brand.SOLIS) {

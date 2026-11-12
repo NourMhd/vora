@@ -159,133 +159,43 @@ public class ProductionEstimationService {
     }
 
     /**
-     * Variante sans comparables: conserve les valeurs réelles; un mois disposant
-     * d'au moins 30 jours réels utilise sa moyenne, sinon chaque jour absent utilise
-     * son théorique saisonnier.
+     * Rule of three over the selected period, starting at commissioning.
+     * A valid zero is monitored. Without monitored days no estimate is available.
+     * Daily comparison retains its independent estimation policy.
      */
     public DisplayedProductionComputation computeDisplayedProduction(
-            DailySiteProduction target,
-            LocalDate startDate,
-            LocalDate endDate
+            DailySiteProduction target, LocalDate startDate, LocalDate endDate
     ) {
-        if (target == null || target.document() == null || startDate == null || endDate == null || endDate.isBefore(startDate)) {
-            return new DisplayedProductionComputation(0.0, 0.0, null, 0, 0);
-        }
-
-        double monitoredKwh = 0.0;
-        int productionDays = 0;
-        int monitoredDays = 0;
-        double estimatedKwh = 0.0;
-        Map<YearMonth, Double> monthlyAverages = monthlyRealAverages(target);
-
-        LocalDate cursor = startDate;
-        while (!cursor.isAfter(endDate)) {
-            if (isProductionDay(target, cursor)) {
-                productionDays++;
-                Double real = valueForDay(target, cursor);
-                if (real != null && real > EPSILON) {
-                    monitoredDays++;
-                    monitoredKwh += real;
-                } else {
-                    DailyProductionDecision decision = decideDailyProduction(
-                            target, cursor, monthlyAverages);
-                    if (decision.estimated() && decision.effectiveValue() != null) {
-                        estimatedKwh += decision.effectiveValue();
-                    }
-                }
-            }
-            cursor = cursor.plusDays(1);
-        }
-
-        int unmonitoredDays = Math.max(0, productionDays - monitoredDays);
-        if (productionDays <= 0) {
-            return new DisplayedProductionComputation(
-                    round2(monitoredKwh),
-                    0.0,
-                    null,
-                    monitoredDays,
-                    unmonitoredDays
-            );
-        }
-
-        double displayedKwh = monitoredKwh + estimatedKwh;
-
-        return new DisplayedProductionComputation(
-                round2(monitoredKwh),
-                round2(estimatedKwh),
-                round2(displayedKwh),
-                monitoredDays,
-                unmonitoredDays
-        );
-    }
-
-    /**
-     * Calcul principal du suivi production. L'estimation est faite jour par jour
-     * afin de respecter la saison, avec une référence strictement limitée au même
-     * gouvernorat et normalisée en kWh/kWc/jour.
-     */
-    public DisplayedProductionComputation computeDisplayedProduction(
-            DailySiteProduction target,
-            List<DailySiteProduction> allSites,
-            LocalDate startDate,
-            LocalDate endDate
-    ) {
-        if (target == null || target.document() == null
+        if (target == null || target.document() == null || target.swapDate() == null
                 || startDate == null || endDate == null || endDate.isBefore(startDate)) {
             return unavailableDisplayedProduction();
         }
-
-        if (target.installedPowerKw() <= EPSILON) {
-            DisplayedProductionComputation direct = computeDisplayedProduction(target, startDate, endDate);
-            return new DisplayedProductionComputation(
-                    direct.realKwh(),
-                    0.0,
-                    null,
-                    direct.monitoredDays(),
-                    direct.estimatedDays()
-            );
-        }
-
-        double monitoredKwh = 0.0;
-        double estimatedKwh = 0.0;
+        double realKwh = 0.0;
         int monitoredDays = 0;
-        int estimatedDays = 0;
-        Map<YearMonth, EstimationBasis> basisByMonth = new HashMap<>();
-
-        LocalDate cursor = startDate;
-        while (!cursor.isAfter(endDate)) {
-            if (isProductionDay(target, cursor)) {
-                Double real = valueForDay(target, cursor);
-                if (real != null && real > EPSILON) {
-                    monitoredKwh += real;
-                    monitoredDays++;
-                } else {
-                    YearMonth month = YearMonth.from(cursor);
-                    EstimationBasis basis = basisByMonth.computeIfAbsent(
-                            month,
-                            ignored -> estimationBasis(target, allSites, month)
-                    );
-                    DailyEstimate estimate = estimateMissingDay(target, cursor, basis);
-                    if (estimate.value() != null) {
-                        estimatedKwh += estimate.value();
-                    }
-                    estimatedDays++;
-                }
+        int missingDays = 0;
+        for (LocalDate day = startDate; !day.isAfter(endDate); day = day.plusDays(1)) {
+            if (!isProductionDay(target, day)) continue;
+            Double value = valueForDay(target, day);
+            if (value != null) {
+                realKwh += value;
+                monitoredDays++;
+            } else {
+                missingDays++;
             }
-            cursor = cursor.plusDays(1);
         }
-
-        if (monitoredDays == 0 && estimatedDays == 0) {
-            return unavailableDisplayedProduction();
+        if (monitoredDays == 0) {
+            return new DisplayedProductionComputation(0.0, 0.0, null, 0, missingDays);
         }
+        double estimatedKwh = realKwh / monitoredDays * missingDays;
+        return new DisplayedProductionComputation(round2(realKwh), round2(estimatedKwh),
+                round2(realKwh + estimatedKwh), monitoredDays, missingDays);
+    }
 
-        return new DisplayedProductionComputation(
-                round2(monitoredKwh),
-                round2(estimatedKwh),
-                round2(monitoredKwh + estimatedKwh),
-                monitoredDays,
-                estimatedDays
-        );
+    public DisplayedProductionComputation computeDisplayedProduction(
+            DailySiteProduction target, List<DailySiteProduction> allSites,
+            LocalDate startDate, LocalDate endDate
+    ) {
+        return computeDisplayedProduction(target, startDate, endDate);
     }
 
     private DailyEstimate estimateMissingDay(
