@@ -83,14 +83,7 @@ class _PerformanceHeader extends StatelessWidget {
                       letterSpacing: -1.1,
                     ),
                   ),
-                  SizedBox(height: 6),
-                  Text(
-                    'Comparaison du kWh théorique avec la production réelle et estimée.',
-                    style: TextStyle(
-                      color: AppColors.mutedText,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
+                  
                 ],
               ),
             ),

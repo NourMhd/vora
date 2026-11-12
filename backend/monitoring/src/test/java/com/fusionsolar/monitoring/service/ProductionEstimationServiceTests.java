@@ -135,7 +135,7 @@ class ProductionEstimationServiceTests {
     }
 
     @Test
-    void computesDisplayedProductionDayByDayWithRegionalWeighting() {
+    void computesDisplayedProductionUsingOnlySelectedPeriodAverage() {
         LocalDate start = LocalDate.of(2025, 3, 1);
         LocalDate end = LocalDate.of(2025, 3, 12);
         var target = production("ARI_0001", "ARI", "Zone A", 10.0, start,
@@ -145,25 +145,75 @@ class ProductionEstimationServiceTests {
 
         var result = service.computeDisplayedProduction(target, List.of(target, peer), start, end);
 
-        double confidence = 10.0 / 30.0;
-        double estimatedPerDay = confidence * 20.0 + (1.0 - confidence) * 24.0;
         assertThat(result.realKwh()).isEqualTo(200.0);
         assertThat(result.monitoredDays()).isEqualTo(10);
         assertThat(result.estimatedDays()).isEqualTo(2);
-        assertThat(result.estimatedKwh()).isEqualTo(service.round2(estimatedPerDay * 2));
-        assertThat(result.displayedKwh()).isEqualTo(service.round2(200.0 + estimatedPerDay * 2));
+        assertThat(result.estimatedKwh()).isEqualTo(40.0);
+        assertThat(result.displayedKwh()).isEqualTo(240.0);
     }
 
     @Test
-    void keepsResultUnavailableWhenInstalledPowerIsMissing() {
+    void estimatesWithoutInstalledPower() {
         LocalDate day = LocalDate.of(2025, 3, 1);
         var target = production("ARI_0001", "ARI", "Zone A", 0.0, day, Map.of(day, 20.0));
 
         var result = service.computeDisplayedProduction(target, List.of(target), day, day.plusDays(2));
 
         assertThat(result.realKwh()).isEqualTo(20.0);
-        assertThat(result.estimatedKwh()).isZero();
+        assertThat(result.estimatedKwh()).isEqualTo(40.0);
+        assertThat(result.displayedKwh()).isEqualTo(60.0);
+    }
+
+    @Test
+    void estimatesOneHundredMissingDaysFromTwoHundredMonitoredDays() {
+        LocalDate start = LocalDate.of(2025, 1, 1);
+        var target = production("ARI_1", "ARI", "Zone A", 10, start,
+                consecutiveValues(start, 200, 100));
+        var result = service.computeDisplayedProduction(target, start, start.plusDays(299));
+        assertThat(result.realKwh()).isEqualTo(20000.0);
+        assertThat(result.estimatedKwh()).isEqualTo(10000.0);
+        assertThat(result.displayedKwh()).isEqualTo(30000.0);
+        assertThat(result.monitoredDays()).isEqualTo(200);
+        assertThat(result.estimatedDays()).isEqualTo(100);
+    }
+
+    @Test
+    void countsZeroAsMonitoredAndIgnoresValuesOutsidePeriodAndBeforeCommissioning() {
+        LocalDate start = LocalDate.of(2025, 1, 1);
+        var target = production("ARI_1", "ARI", "Zone A", 10, start.plusDays(1),
+                Map.of(start, 999.0, start.plusDays(1), 0.0,
+                        start.plusDays(2), 20.0, start.plusDays(20), 999.0));
+        var result = service.computeDisplayedProduction(target, start, start.plusDays(3));
+        assertThat(result.monitoredDays()).isEqualTo(2);
+        assertThat(result.estimatedDays()).isEqualTo(1);
+        assertThat(result.realKwh()).isEqualTo(20.0);
+        assertThat(result.estimatedKwh()).isEqualTo(10.0);
+        assertThat(result.displayedKwh()).isEqualTo(30.0);
+    }
+
+    @Test
+    void noMonitoredDaysMeansUnavailableAndInvalidValuesAreMissing() {
+        LocalDate start = LocalDate.of(2025, 1, 1);
+        var values = new HashMap<LocalDate, Double>();
+        values.put(start, null);
+        values.put(start.plusDays(1), -1.0);
+        values.put(start.plusDays(2), Double.NaN);
+        values.put(start.plusDays(3), Double.POSITIVE_INFINITY);
+        var target = production("ARI_1", "ARI", "Zone A", 10, start, values);
+        var result = service.computeDisplayedProduction(target, start, start.plusDays(4));
+        assertThat(result.monitoredDays()).isZero();
+        assertThat(result.estimatedDays()).isEqualTo(5);
         assertThat(result.displayedKwh()).isNull();
+    }
+
+    @Test
+    void fullyMonitoredZeroProductionIsAvailable() {
+        LocalDate start = LocalDate.of(2025, 1, 1);
+        var target = production("ARI_1", "ARI", "Zone A", 10, start, Map.of(start, 0.0));
+        var result = service.computeDisplayedProduction(target, start, start);
+        assertThat(result.displayedKwh()).isEqualTo(0.0);
+        assertThat(result.monitoredDays()).isEqualTo(1);
+        assertThat(result.estimatedDays()).isZero();
     }
 
     private Map<LocalDate, Double> consecutiveValues(LocalDate start, int days, double dailyKwh) {
