@@ -167,12 +167,14 @@ public class PerformanceReportService {
         LocalDate swapDate = site.getSwapDate();
         LocalDate commissioningDate = parseFlexibleDate(site.getGridConnectionDate());
 
-        LocalDate productionStart = commissioningDate != null
-                ? maxDate(range.startDate(), commissioningDate)
+        LocalDate productionStart = swapDate != null
+                ? maxDate(range.startDate(), swapDate)
                 : null;
         LocalDate productionEnd = effectiveFilterEnd;
 
         int productionDays = daysInclusive(productionStart, productionEnd);
+        // Report days use the same swap-bounded period as both energy calculations.
+        filterDays = productionDays;
         double installedPowerKw = safeDouble(site.getInstalledPowerKw());
 
         Double expectedKwh = zone == null || installedPowerKw <= 0 || productionStart == null
@@ -190,7 +192,9 @@ public class PerformanceReportService {
 
         boolean canCompare = expectedKwh != null && actualKwh != null;
 
-        String dataStatus = expectedKwh == null
+        String dataStatus = swapDate == null
+                ? "MISSING_SWAP_DATE"
+                : expectedKwh == null
                 ? "MISSING_EXPECTED_KWH"
                 : actualKwh == null
                     ? "MISSING_REAL_KWH"
@@ -231,8 +235,8 @@ public class PerformanceReportService {
                 zone,
                 governorate,
                 expectedKwh,
-                round2(actual.capturedKwh()),
-                round2(actual.estimatedMissingKwh()),
+                swapDate == null ? null : round2(actual.capturedKwh()),
+                swapDate == null || actualKwh == null ? null : round2(actual.estimatedMissingKwh()),
                 actualKwh,
                 differenceKwh,
                 differencePercent,
@@ -454,7 +458,7 @@ public class PerformanceReportService {
                 governorate,
                 zone,
                 site != null ? safeDouble(site.getInstalledPowerKw()) : 0.0,
-                site != null ? parseFlexibleDate(site.getGridConnectionDate()) : null,
+                site != null ? site.getSwapDate() : null,
                 valuesByDate,
                 presentDates
         );

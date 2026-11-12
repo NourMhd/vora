@@ -159,7 +159,7 @@ public class ProductionEstimationService {
     }
 
     /**
-     * Rule of three over the selected period, starting at commissioning.
+     * Rule of three over the selected period, bounded by the swap date (independent of commissioning).
      * A valid zero is monitored. Without monitored days no estimate is available.
      * Daily comparison retains its independent estimation policy.
      */

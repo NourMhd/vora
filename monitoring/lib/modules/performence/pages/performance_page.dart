@@ -83,7 +83,7 @@ class _PerformanceHeader extends StatelessWidget {
                       letterSpacing: -1.1,
                     ),
                   ),
-                  
+                
                 ],
               ),
             ),
@@ -599,10 +599,10 @@ class _PerformanceTableState extends State<_PerformanceTable> {
           xlsx.TextCellValue(_displayIsoDate(row.filterEndDate)),
           xlsx.TextCellValue(_displayIsoDate(row.swapDate)),
           xlsx.TextCellValue(_displayIsoDate(row.gridConnectionDate)),
-          xlsx.IntCellValue(row.filterDaysCount),
-          xlsx.IntCellValue(row.productionDaysCount),
-          xlsx.IntCellValue(row.capturedDaysCount),
-          xlsx.IntCellValue(row.estimatedDaysCount),
+          row.hasMissingSwapDate ? xlsx.TextCellValue('Indisponible') : xlsx.IntCellValue(row.filterDaysCount),
+          row.hasMissingSwapDate ? xlsx.TextCellValue('Indisponible') : xlsx.IntCellValue(row.productionDaysCount),
+          row.hasMissingSwapDate ? xlsx.TextCellValue('Indisponible') : xlsx.IntCellValue(row.capturedDaysCount),
+          row.hasMissingSwapDate ? xlsx.TextCellValue('Indisponible') : xlsx.IntCellValue(row.estimatedDaysCount),
           xlsx.TextCellValue(row.plantType),
           xlsx.TextCellValue(row.zone ?? '-'),
           _excelCell(row.expectedKwh),
@@ -869,7 +869,7 @@ class _PerformanceTableRow extends StatelessWidget {
             flex: 9,
             alignment: Alignment.centerRight,
             child: Text(
-              row.filterDaysCount.toString(),
+              row.hasMissingSwapDate ? 'Indisponible' : row.filterDaysCount.toString(),
               style: _cellTextStyle(fontWeight: FontWeight.w800),
             ),
           ),
@@ -881,12 +881,12 @@ class _PerformanceTableRow extends StatelessWidget {
     crossAxisAlignment: CrossAxisAlignment.end,
     children: [
       Text(
-        row.productionDaysCount.toString(),
+        row.hasMissingSwapDate ? 'Indisponible' : row.productionDaysCount.toString(),
         style: _cellTextStyle(fontWeight: FontWeight.w900),
       ),
       const SizedBox(height: 3),
       Text(
-        '${row.capturedDaysCount} / ${row.estimatedDaysCount}',
+        row.hasMissingSwapDate ? 'Swap absent' : '${row.capturedDaysCount} / ${row.estimatedDaysCount}',
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: const TextStyle(
@@ -937,7 +937,7 @@ class _PerformanceTableRow extends StatelessWidget {
             flex: 15,
             alignment: Alignment.centerRight,
             child: Text(
-              row.estimatedDaysCount <= 0 ? '—' : _kwhText(row.estimatedMissingKwh),
+              row.hasMissingSwapDate ? 'Indisponible' : row.estimatedDaysCount <= 0 ? '—' : _kwhText(row.estimatedMissingKwh),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: _cellTextStyle(fontWeight: FontWeight.w800),
@@ -1163,8 +1163,8 @@ _GapStatus _gapStatus(PerformanceReportRow row) {
   final percent = row.differencePercent;
 
   if (percent == null || row.hasMissingData) {
-    return const _GapStatus(
-      label: 'données manquantes',
+    return _GapStatus(
+      label: row.hasMissingSwapDate ? 'Swap absent' : 'données manquantes',
       foreground: Color(0xFF64748B),
       background: Color(0xFFF1F5F9),
       border: Color(0xFFE2E8F0),
@@ -1207,7 +1207,7 @@ _GapStatus _gapStatus(PerformanceReportRow row) {
 }
 
 String _kwhText(num? value) {
-  if (value == null) return '—';
+  if (value == null) return 'Indisponible';
   return '${Formatters.decimal(value, decimals: 3)} kWh';
 }
 
@@ -1256,7 +1256,7 @@ String _bonusMalusText(PerformanceReportRow row) {
 }
 
 xlsx.CellValue _excelCell(num? value) {
-  if (value == null) return xlsx.TextCellValue('-');
+  if (value == null) return xlsx.TextCellValue('Indisponible');
   return xlsx.DoubleCellValue(value.toDouble());
 }
 
