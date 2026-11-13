@@ -135,7 +135,7 @@ class ProductionEstimationServiceTests {
     }
 
     @Test
-    void computesDisplayedProductionUsingOnlySelectedPeriodAverage() {
+    void computesDisplayedProductionUsingBestGovernorateAverage() {
         LocalDate start = LocalDate.of(2025, 3, 1);
         LocalDate end = LocalDate.of(2025, 3, 12);
         var target = production("ARI_0001", "ARI", "Zone A", 10.0, start,
@@ -148,20 +148,18 @@ class ProductionEstimationServiceTests {
         assertThat(result.realKwh()).isEqualTo(200.0);
         assertThat(result.monitoredDays()).isEqualTo(10);
         assertThat(result.estimatedDays()).isEqualTo(2);
-        assertThat(result.estimatedKwh()).isEqualTo(40.0);
-        assertThat(result.displayedKwh()).isEqualTo(240.0);
+        assertThat(result.estimatedKwh()).isEqualTo(48.0);
+        assertThat(result.displayedKwh()).isEqualTo(248.0);
     }
 
     @Test
-    void estimatesWithoutInstalledPower() {
+    void cannotEstimateWithoutInstalledPower() {
         LocalDate day = LocalDate.of(2025, 3, 1);
         var target = production("ARI_0001", "ARI", "Zone A", 0.0, day, Map.of(day, 20.0));
 
         var result = service.computeDisplayedProduction(target, List.of(target), day, day.plusDays(2));
 
-        assertThat(result.realKwh()).isEqualTo(20.0);
-        assertThat(result.estimatedKwh()).isEqualTo(40.0);
-        assertThat(result.displayedKwh()).isEqualTo(60.0);
+        assertThat(result.displayedKwh()).isNull();
     }
 
     @Test
@@ -178,21 +176,21 @@ class ProductionEstimationServiceTests {
     }
 
     @Test
-    void countsZeroAsMonitoredAndIgnoresValuesOutsidePeriodAndBeforeCommissioning() {
+    void replacesZeroAndIgnoresValuesOutsidePeriodAndBeforeSwap() {
         LocalDate start = LocalDate.of(2025, 1, 1);
         var target = production("ARI_1", "ARI", "Zone A", 10, start.plusDays(1),
                 Map.of(start, 999.0, start.plusDays(1), 0.0,
                         start.plusDays(2), 20.0, start.plusDays(20), 999.0));
         var result = service.computeDisplayedProduction(target, start, start.plusDays(3));
-        assertThat(result.monitoredDays()).isEqualTo(2);
-        assertThat(result.estimatedDays()).isEqualTo(1);
+        assertThat(result.monitoredDays()).isEqualTo(1);
+        assertThat(result.estimatedDays()).isEqualTo(2);
         assertThat(result.realKwh()).isEqualTo(20.0);
-        assertThat(result.estimatedKwh()).isEqualTo(10.0);
-        assertThat(result.displayedKwh()).isEqualTo(30.0);
+        assertThat(result.estimatedKwh()).isEqualTo(40.0);
+        assertThat(result.displayedKwh()).isEqualTo(60.0);
     }
 
     @Test
-    void noMonitoredDaysMeansUnavailableAndInvalidValuesAreMissing() {
+    void noValidDaysUsesTheoreticalAndInvalidValuesAreEstimated() {
         LocalDate start = LocalDate.of(2025, 1, 1);
         var values = new HashMap<LocalDate, Double>();
         values.put(start, null);
@@ -203,17 +201,17 @@ class ProductionEstimationServiceTests {
         var result = service.computeDisplayedProduction(target, start, start.plusDays(4));
         assertThat(result.monitoredDays()).isZero();
         assertThat(result.estimatedDays()).isEqualTo(5);
-        assertThat(result.displayedKwh()).isNull();
+        assertThat(result.displayedKwh()).isEqualTo(110.0);
     }
 
     @Test
-    void fullyMonitoredZeroProductionIsAvailable() {
+    void zeroProductionUsesTheoretical() {
         LocalDate start = LocalDate.of(2025, 1, 1);
         var target = production("ARI_1", "ARI", "Zone A", 10, start, Map.of(start, 0.0));
         var result = service.computeDisplayedProduction(target, start, start);
-        assertThat(result.displayedKwh()).isEqualTo(0.0);
-        assertThat(result.monitoredDays()).isEqualTo(1);
-        assertThat(result.estimatedDays()).isZero();
+        assertThat(result.displayedKwh()).isEqualTo(22.0);
+        assertThat(result.monitoredDays()).isZero();
+        assertThat(result.estimatedDays()).isEqualTo(1);
     }
 
     private Map<LocalDate, Double> consecutiveValues(LocalDate start, int days, double dailyKwh) {

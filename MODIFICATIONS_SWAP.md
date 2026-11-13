@@ -1,3 +1,5 @@
+> Historique : la règle courante est décrite dans MODIFICATIONS_GOUVERNORAT.md.
+
 # Suivi production : période limitée par la date de swap
 
 - Début = max(début filtre, date de swap), indépendamment de la mise en service.
