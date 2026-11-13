@@ -75,8 +75,7 @@ class _PerformanceHeader extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Tooltip(
-                    message: 'Jours absents ou < 1 kWh/kWc : moyenne des jours valides du meilleur site du même gouvernorat, adaptée à la puissance. Sans référence : théorique du jour. Période limitée par le swap et hier.',
-                    child: Text(
+message: 'Jours absents, à zéro ou invalides : moyenne des jours positifs du meilleur site du même gouvernorat, adaptée à la puissance. Sans référence : théorique du jour. Période limitée par le swap et hier.',                    child: Text(
                       'Suivi production',
                       style: TextStyle(
                         color: AppColors.midnightNavy,
@@ -576,8 +575,8 @@ class _PerformanceTableState extends State<_PerformanceTable> {
         xlsx.TextCellValue('Date mise en service'),
         xlsx.TextCellValue('Jours filtre'),
         xlsx.TextCellValue('Jours production'),
-        xlsx.TextCellValue('Jours réels valides (≥ 1 kWh/kWc)'),
-        xlsx.TextCellValue('Jours estimés (absents ou < 1 kWh/kWc)'),
+        xlsx.TextCellValue('Jours réels valides (> 0 kWh)'),
+        xlsx.TextCellValue('Jours estimés (absents, nuls ou invalides)'),
         xlsx.TextCellValue('RT/GF'),
         xlsx.TextCellValue('Zone'),
         xlsx.TextCellValue('kWh prévu'),

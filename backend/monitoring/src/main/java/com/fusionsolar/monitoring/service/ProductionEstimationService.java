@@ -227,8 +227,8 @@ public class ProductionEstimationService {
             return null;
         }
         Double value = site.valuesByDate().get(day);
-        return value != null && Double.isFinite(value) && value >= site.installedPowerKw()
-                ? value : null;
+        return value != null && Double.isFinite(value) && value > 0
+        ? value : null;
     }
 
     private Double reportAverageYield(DailySiteProduction site, LocalDate start, LocalDate end) {
