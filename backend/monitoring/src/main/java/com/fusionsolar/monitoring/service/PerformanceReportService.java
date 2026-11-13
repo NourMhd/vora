@@ -177,14 +177,14 @@ public class PerformanceReportService {
         filterDays = productionDays;
         double installedPowerKw = safeDouble(site.getInstalledPowerKw());
 
-        Double expectedKwh = zone == null || installedPowerKw <= 0 || productionStart == null
+        Double expectedKwh = zone == null || !Double.isFinite(installedPowerKw) || installedPowerKw <= 0 || productionStart == null
                 ? null
                 : round2(productionEstimationService.theoreticalYieldPerKwc(zone, productionStart, productionEnd) * installedPowerKw);
 
         ActualComputation actual = computeActualKwh(
                 siteProduction,
                 allSiteProductions,
-                productionStart,
+                range.startDate(),
                 productionEnd,
                 yesterday
         );
@@ -487,7 +487,7 @@ public class PerformanceReportService {
             }
 
             presentDates.add(day);
-            Double sanitizedValue = productionEstimationService.normalizeHistoryValue(sanitizeHistoryValue(site, point.getValue()));
+            Double sanitizedValue = sanitizeHistoryValue(site, point.getValue());
             if (sanitizedValue != null) {
                 valuesByDate.merge(day, sanitizedValue, Math::max);
             }
@@ -832,7 +832,7 @@ public class PerformanceReportService {
             return null;
         }
 
-        return round2(value);
+        return value;
     }
 
     private double safeDouble(Double value) {

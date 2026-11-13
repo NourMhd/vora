@@ -26,19 +26,34 @@ class PerformanceReportSwapTests {
   site.setSwapDate(swap);site.setGridConnectionDate("2026-02-01");
   var r=row(start,end,end,Map.of(start,999.0,swap,0.0,swap.plusDays(1),20.0));
   eq(r.getProductionStartDate(),"2025-11-10");eq(r.getProductionDaysCount(),21);eq(r.getFilterDaysCount(),21);
-  eq(r.getCapturedDaysCount(),2);eq(r.getEstimatedDaysCount(),19);eq(r.getCapturedKwh(),20.0);
-  eq(r.getEstimatedMissingKwh(),190.0);eq(r.getActualKwh(),210.0);eq(r.getExpectedKwh(),560.0);
+  eq(r.getCapturedDaysCount(),1);eq(r.getEstimatedDaysCount(),20);eq(r.getCapturedKwh(),20.0);
+  eq(r.getEstimatedMissingKwh(),400.0);eq(r.getActualKwh(),420.0);eq(r.getExpectedKwh(),560.0);
   site.setGridConnectionDate(null);eq(row(start,end,end,Map.of(swap,20.0)).getActualKwh(),420.0);
   site.setSwapDate(start.minusDays(10));eq(row(start,end,end,Map.of(start,20.0)).getFilterDaysCount(),30);
   site.setSwapDate(swap);r=row(start,end,swap.plusDays(1),Map.of(swap,20.0));
   eq(r.getProductionEndDate(),"2025-11-11");eq(r.getFilterDaysCount(),2);eq(r.getActualKwh(),40.0);
-  r=row(start,end,end,Map.of());eq(r.getActualKwh(),null);eq(r.getEstimatedMissingKwh(),null);eq(r.getEstimatedDaysCount(),21);
+  r=row(start,end,end,Map.of());eq(r.getActualKwh(),560.0);eq(r.getEstimatedMissingKwh(),560.0);eq(r.getEstimatedDaysCount(),21);
   site.setSwapDate(end.plusDays(1));r=row(start,end,end,Map.of());eq(r.getProductionDaysCount(),0);eq(r.getActualKwh(),null);
   site.setSwapDate(null);r=row(start,end,end,Map.of(start,20.0));
   eq(r.getExpectedKwh(),null);eq(r.getCapturedKwh(),null);eq(r.getEstimatedMissingKwh(),null);eq(r.getActualKwh(),null);eq(r.getDataStatus(),"MISSING_SWAP_DATE");
   site.setSwapDate(LocalDate.of(2026,1,1));site.setGridConnectionDate("2026-02-01");
   r=row(LocalDate.of(2025,5,1),LocalDate.of(2026,5,1),LocalDate.of(2026,5,1),Map.of());
   eq(r.getProductionDaysCount(),121);eq(r.getProductionStartDate(),"2026-01-01");
+  // Reference must use the common filter, including valid peer days before the target swap.
+  site.setSwapDate(swap);
+  var peerDoc = new SiteDocument();
+  peerDoc.setSiteCode("ARI_peer");
+  var peerValues = Map.of(start, 30.0);
+  var peer = new DailySiteProduction(peerDoc,"ARI_peer","ARI_peer","ARI","Zone A",5,start,peerValues,peerValues.keySet());
+  var target = new DailySiteProduction(site,"ARI_1","ARI_1","ARI","Zone A",10,swap,Map.of(),Set.of());
+  r=(PerformanceReportRowDto)toRow.invoke(service,site,ctor.newInstance(start,end),end,target,List.of(target,peer));
+  eq(r.getActualKwh(),1260.0); eq(r.getCapturedDaysCount(),0);eq(r.getEstimatedDaysCount(),21);
+  var collect=PerformanceReportService.class.getDeclaredMethod("collectDailyValues",SiteDocument.class,List.class,LocalDate.class,LocalDate.class,Map.class,Set.class);
+  collect.setAccessible(true);
+  Map<LocalDate,Double> loadedValues = new HashMap<>();
+  collect.invoke(service,site,List.of(new com.fusionsolar.monitoring.dto.HistoryPointDto(
+    start.atStartOfDay(ZoneId.of("Africa/Tunis")).toInstant().toEpochMilli(),9.999)),start,end,loadedValues,new HashSet<LocalDate>());
+  eq(loadedValues.get(start),9.999);
   load=PerformanceReportService.class.getDeclaredMethod("loadSiteProduction",SiteDocument.class,LocalDate.class,LocalDate.class);load.setAccessible(true);
   var loaded=(DailySiteProduction)load.invoke(service,site,null,null);eq(loaded.swapDate(),site.getSwapDate());
 

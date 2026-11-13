@@ -159,43 +159,112 @@ public class ProductionEstimationService {
     }
 
     /**
-     * Rule of three over the selected period, bounded by the swap date (independent of commissioning).
-     * A valid zero is monitored. Without monitored days no estimate is available.
-     * Daily comparison retains its independent estimation policy.
+     * Production report only: replace absent/invalid days and yields strictly below
+     * 1 kWh/kWc with the best same-governorate site's valid-day average.
+     * Each candidate uses the common filter, bounded by its own swap date.
+     * With no valid reference, use the target's daily theoretical production.
+     * The independent daily-comparison policy below is unchanged.
      */
     public DisplayedProductionComputation computeDisplayedProduction(
             DailySiteProduction target, LocalDate startDate, LocalDate endDate
     ) {
-        if (target == null || target.document() == null || target.swapDate() == null
-                || startDate == null || endDate == null || endDate.isBefore(startDate)) {
-            return unavailableDisplayedProduction();
-        }
-        double realKwh = 0.0;
-        int monitoredDays = 0;
-        int missingDays = 0;
-        for (LocalDate day = startDate; !day.isAfter(endDate); day = day.plusDays(1)) {
-            if (!isProductionDay(target, day)) continue;
-            Double value = valueForDay(target, day);
-            if (value != null) {
-                realKwh += value;
-                monitoredDays++;
-            } else {
-                missingDays++;
-            }
-        }
-        if (monitoredDays == 0) {
-            return new DisplayedProductionComputation(0.0, 0.0, null, 0, missingDays);
-        }
-        double estimatedKwh = realKwh / monitoredDays * missingDays;
-        return new DisplayedProductionComputation(round2(realKwh), round2(estimatedKwh),
-                round2(realKwh + estimatedKwh), monitoredDays, missingDays);
+        return computeDisplayedProduction(target,
+                target == null ? List.of() : List.of(target), startDate, endDate);
     }
 
     public DisplayedProductionComputation computeDisplayedProduction(
             DailySiteProduction target, List<DailySiteProduction> allSites,
             LocalDate startDate, LocalDate endDate
     ) {
-        return computeDisplayedProduction(target, startDate, endDate);
+        if (target == null || target.document() == null || target.swapDate() == null
+                || !validReportPower(target.installedPowerKw())
+                || startDate == null || endDate == null || endDate.isBefore(startDate)
+                || target.swapDate().isAfter(endDate)) {
+            return unavailableDisplayedProduction();
+        }
+
+        Double bestYield = reportReferenceYield(target, allSites, startDate, endDate);
+        double realKwh = 0.0;
+        double estimatedKwh = 0.0;
+        int monitoredDays = 0;
+        int estimatedDays = 0;
+        boolean available = true;
+        LocalDate firstDay = startDate.isAfter(target.swapDate()) ? startDate : target.swapDate();
+        for (LocalDate day = firstDay; !day.isAfter(endDate); day = day.plusDays(1)) {
+            Double value = validReportValue(target, day);
+            if (value != null) {
+                realKwh += value;
+                monitoredDays++;
+            } else {
+                estimatedDays++;
+                Double replacement = null;
+                if (bestYield != null) {
+                    replacement = bestYield * target.installedPowerKw();
+                } else if (!isBlank(target.zone()) && THEORETICAL_DAILY_YIELD.containsKey(target.zone())) {
+                    replacement = theoreticalDailyYieldPerKwc(target.zone(), day) * target.installedPowerKw();
+                }
+                if (replacement == null || !Double.isFinite(replacement)) {
+                    available = false;
+                } else {
+                    estimatedKwh += replacement;
+                }
+            }
+        }
+        return new DisplayedProductionComputation(round2(realKwh),
+                available ? round2(estimatedKwh) : null,
+                available ? round2(realKwh + estimatedKwh) : null,
+                monitoredDays, estimatedDays);
+    }
+
+    private boolean validReportPower(double power) {
+        return Double.isFinite(power) && power > 0;
+    }
+
+    /** Compare before rounding: exactly 1 kWh/kWc is valid. */
+    private Double validReportValue(DailySiteProduction site, LocalDate day) {
+        if (!validReportPower(site.installedPowerKw()) || !isProductionDay(site, day)
+                || site.valuesByDate() == null) {
+            return null;
+        }
+        Double value = site.valuesByDate().get(day);
+        return value != null && Double.isFinite(value) && value >= site.installedPowerKw()
+                ? value : null;
+    }
+
+    private Double reportAverageYield(DailySiteProduction site, LocalDate start, LocalDate end) {
+        if (site == null || site.document() == null || site.swapDate() == null
+                || !validReportPower(site.installedPowerKw()) || site.swapDate().isAfter(end)) {
+            return null;
+        }
+        double sum = 0;
+        int count = 0;
+        LocalDate firstDay = start.isAfter(site.swapDate()) ? start : site.swapDate();
+        for (LocalDate day = firstDay; !day.isAfter(end); day = day.plusDays(1)) {
+            Double value = validReportValue(site, day);
+            if (value != null) {
+                sum += value;
+                count++;
+            }
+        }
+        if (count == 0) return null;
+        double yield = sum / count / site.installedPowerKw();
+        return Double.isFinite(yield) ? yield : null;
+    }
+
+    private Double reportReferenceYield(DailySiteProduction target, List<DailySiteProduction> sites,
+                                        LocalDate start, LocalDate end) {
+        // Always include the target so the best site's gaps use its own average.
+        Double best = reportAverageYield(target, start, end);
+        if (isBlank(target.governorate()) || sites == null) return best;
+        for (DailySiteProduction candidate : sites) {
+            if (candidate == null || isBlank(candidate.governorate())
+                    || !target.governorate().equalsIgnoreCase(candidate.governorate())) continue;
+            Double candidateYield = reportAverageYield(candidate, start, end);
+            if (candidateYield != null && (best == null || candidateYield > best)) {
+                best = candidateYield;
+            }
+        }
+        return best;
     }
 
     private DailyEstimate estimateMissingDay(
