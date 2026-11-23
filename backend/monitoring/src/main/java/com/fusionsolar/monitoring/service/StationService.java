@@ -1,5 +1,6 @@
 package com.fusionsolar.monitoring.service;
 
+import com.fusionsolar.monitoring.util.SiteProductionPolicy;
 import com.fusionsolar.monitoring.dto.DashboardSummaryDto;
 import com.fusionsolar.monitoring.dto.HistoryPointDto;
 import com.fusionsolar.monitoring.dto.SiteDetailDto;
@@ -149,7 +150,7 @@ public class StationService {
         if (isUsableCachedHistory(site, cached)) {
             List<HistoryPointDto> points = cached.getPoints();
             siteEnergyKpiReconciliationService.reconcileAfterHistoryLoad(site, normalizedType, value, points);
-            return points;
+            return SiteProductionPolicy.history(site, points);
         }
 
         /*
@@ -166,11 +167,11 @@ public class StationService {
         if (cached != null && cached.getPoints() != null) {
             if (site.getBrand() != Brand.SOLIS ||
                     (!looksLikeSolisUnscopedHistory(cached.getPoints()) && !looksLikeSolisAggregateMonthOrYear(cached)))
-                return cached.getPoints();
+                return SiteProductionPolicy.history(site, cached.getPoints());
         }
 
         if (cached != null && cached.getPoints() != null && isUsableCachedHistory(site, cached)) {
-            return cached.getPoints();
+            return SiteProductionPolicy.history(site, cached.getPoints());
         }
 
         return List.of();
@@ -335,7 +336,7 @@ public class StationService {
         SiteHistoryDocument cached = findHistory(site, HistoryGranularity.YEARLY, "all").orElse(null);
 
         return cached != null && cached.getPoints() != null
-                ? cached.getPoints()
+                ? SiteProductionPolicy.history(site, cached.getPoints())
                 : List.of();
     }
 
@@ -366,7 +367,7 @@ public class StationService {
             }
         }
 
-        return points;
+        return SiteProductionPolicy.history(site, points);
     }
 
     private Optional<SiteHistoryDocument> findHistory(

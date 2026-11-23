@@ -1,5 +1,6 @@
 package com.fusionsolar.monitoring.service;
 
+import com.fusionsolar.monitoring.util.SiteProductionPolicy;
 import com.fusionsolar.monitoring.dto.HistoryPointDto;
 import com.fusionsolar.monitoring.dto.PerformanceReportRowDto;
 import com.fusionsolar.monitoring.persistence.document.SiteDocument;
@@ -188,11 +189,13 @@ public class PerformanceReportService {
                 productionEnd,
                 yesterday
         );
+        boolean forcedZero = SiteProductionPolicy.forcesZero(site);
+        if (forcedZero) actual = new ActualComputation(0.0, 0.0, 0.0, 0, 0);
         Double actualKwh = actual.finalKwh();
 
         boolean canCompare = expectedKwh != null && actualKwh != null;
 
-        String dataStatus = swapDate == null
+        String dataStatus = forcedZero ? "FORCED_ZERO" : swapDate == null
                 ? "MISSING_SWAP_DATE"
                 : expectedKwh == null
                 ? "MISSING_EXPECTED_KWH"
@@ -235,8 +238,8 @@ public class PerformanceReportService {
                 zone,
                 governorate,
                 expectedKwh,
-                swapDate == null ? null : round2(actual.capturedKwh()),
-                swapDate == null || actualKwh == null ? null : round2(actual.estimatedMissingKwh()),
+                SiteProductionPolicy.energy(site, swapDate == null ? null : round2(actual.capturedKwh())),
+                SiteProductionPolicy.energy(site, swapDate == null || actualKwh == null ? null : round2(actual.estimatedMissingKwh())),
                 actualKwh,
                 differenceKwh,
                 differencePercent,

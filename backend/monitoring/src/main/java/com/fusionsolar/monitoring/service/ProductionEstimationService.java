@@ -1,5 +1,6 @@
 package com.fusionsolar.monitoring.service;
 
+import com.fusionsolar.monitoring.util.SiteProductionPolicy;
 import com.fusionsolar.monitoring.persistence.document.SiteDocument;
 import org.springframework.stereotype.Service;
 
@@ -95,6 +96,9 @@ public class ProductionEstimationService {
             LocalDate day,
             Map<YearMonth, Double> monthlyRealAverages
     ) {
+        if (target != null && SiteProductionPolicy.forcesZero(target.document())) {
+            return new DailyProductionDecision(0.0, 0.0, false, false, "FORCED_ZERO");
+        }
         if (target == null || target.document() == null) {
             return DailyProductionDecision.unavailable("SITE_NOT_FOUND");
         }
@@ -141,6 +145,9 @@ public class ProductionEstimationService {
             List<DailySiteProduction> allSites,
             LocalDate day
     ) {
+        if (target != null && SiteProductionPolicy.forcesZero(target.document())) {
+            return new DailyProductionDecision(0.0, 0.0, false, false, "FORCED_ZERO");
+        }
         if (target == null || target.document() == null) {
             return DailyProductionDecision.unavailable("SITE_NOT_FOUND");
         }
@@ -176,6 +183,9 @@ public class ProductionEstimationService {
             DailySiteProduction target, List<DailySiteProduction> allSites,
             LocalDate startDate, LocalDate endDate
     ) {
+        if (target != null && SiteProductionPolicy.forcesZero(target.document())) {
+            return new DisplayedProductionComputation(0.0, 0.0, 0.0, 0, 0);
+        }
         if (target == null || target.document() == null || target.swapDate() == null
                 || !validReportPower(target.installedPowerKw())
                 || startDate == null || endDate == null || endDate.isBefore(startDate)
@@ -232,7 +242,7 @@ public class ProductionEstimationService {
     }
 
     private Double reportAverageYield(DailySiteProduction site, LocalDate start, LocalDate end) {
-        if (site == null || site.document() == null || site.swapDate() == null
+        if (site == null || SiteProductionPolicy.forcesZero(site.document()) || site.document() == null || site.swapDate() == null
                 || !validReportPower(site.installedPowerKw()) || site.swapDate().isAfter(end)) {
             return null;
         }
@@ -332,7 +342,7 @@ public class ProductionEstimationService {
 
         double bestSpecificDailyYield = -1.0;
         for (DailySiteProduction candidate : allSites) {
-            if (candidate == null || candidate.document() == null || candidate.installedPowerKw() <= EPSILON
+            if (candidate == null || candidate.document() == null || SiteProductionPolicy.forcesZero(candidate.document()) || candidate.installedPowerKw() <= EPSILON
                     || candidate.swapDate() == null || sameSite(target, candidate)
                     || !Objects.equals(target.governorate(), candidate.governorate())) {
                 continue;

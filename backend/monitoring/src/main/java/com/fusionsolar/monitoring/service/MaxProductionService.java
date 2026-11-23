@@ -1,5 +1,6 @@
 package com.fusionsolar.monitoring.service;
 
+import com.fusionsolar.monitoring.util.SiteProductionPolicy;
 import com.fusionsolar.monitoring.dto.HistoryPointDto;
 import com.fusionsolar.monitoring.dto.MaxProductionReportDto;
 import com.fusionsolar.monitoring.dto.MaxProductionRowDto;
@@ -82,7 +83,8 @@ public class MaxProductionService {
                 .orElse(null);
 
         Double installedPowerKw = productionEstimationService.round2(site.getInstalledPowerKw());
-        Double maxProduction = maxEntry == null ? null : productionEstimationService.round2(maxEntry.getValue());
+        Double maxProduction = SiteProductionPolicy.energy(site,
+                maxEntry == null ? null : productionEstimationService.round2(maxEntry.getValue()));
         Double kwhPerKwc = null;
 
         if (maxProduction != null && installedPowerKw != null && installedPowerKw > ProductionEstimationService.EPSILON) {
