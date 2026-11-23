@@ -1,5 +1,6 @@
 package com.fusionsolar.monitoring.service;
 
+import com.fusionsolar.monitoring.util.SiteProductionPolicy;
 import com.fusionsolar.monitoring.dto.DailyComparisonCellDto;
 import com.fusionsolar.monitoring.dto.DailyComparisonReportDto;
 import com.fusionsolar.monitoring.dto.DailyComparisonRowDto;
@@ -284,6 +285,9 @@ public class DailyComparisonService {
     }
 
     private DailyComparisonCellDto historicalCell(ProductionEstimationService.DailySiteProduction siteValue, LocalDate day) {
+        if (SiteProductionPolicy.forcesZero(siteValue.document())) {
+            return new DailyComparisonCellDto(siteValue.siteCode(), 0.0, formatKwh(0.0), false, "FORCED_ZERO");
+        }
         if (siteValue.document() == null) {
             return new DailyComparisonCellDto(siteValue.siteCode(), null, "site introuvable", false, "SITE_NOT_FOUND");
         }
@@ -313,6 +317,9 @@ public class DailyComparisonService {
             List<ProductionEstimationService.DailySiteProduction> allSites,
             LocalDate day
     ) {
+        if (SiteProductionPolicy.forcesZero(siteValue.document())) {
+            return new DailyComparisonCellDto(siteValue.siteCode(), 0.0, formatKwh(0.0), false, "FORCED_ZERO");
+        }
         if (siteValue.document() == null) {
             return new DailyComparisonCellDto(siteValue.siteCode(), null, "site introuvable", false, "SITE_NOT_FOUND");
         }

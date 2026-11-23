@@ -1,5 +1,6 @@
 package com.fusionsolar.monitoring.service;
 
+import com.fusionsolar.monitoring.util.SiteProductionPolicy;
 import com.fusionsolar.monitoring.dto.HistoryPointDto;
 import com.fusionsolar.monitoring.dto.SiteDescriptionDto;
 import com.fusionsolar.monitoring.dto.SiteDescriptionPhotoDto;
@@ -322,16 +323,16 @@ public class SiteDescriptionService {
                 .comparableSitesCount(comparison.peerCount())
                 .bestSiteName(comparison.bestSiteName())
                 .bestSiteCode(comparison.bestSiteCode())
-                .currentSpecificYieldKwhPerKwp(comparison.currentYield())
+                .currentSpecificYieldKwhPerKwp(SiteProductionPolicy.energy(site, comparison.currentYield()))
                 .bestSpecificYieldKwhPerKwp(comparison.bestYield())
                 .gapPercent(comparison.gapPercent())
                 .comparisonPercent(comparison.comparisonPercent())
                 .swapDate(site.getSwapDate() != null ? site.getSwapDate().toString() : null)
                 .gridConnectionDate(site.getGridConnectionDate())
-                .totalEnergyKwh(round2(nullToZero(site.getTotalEnergyKwh())))
+                .totalEnergyKwh(SiteProductionPolicy.energy(site, round2(nullToZero(site.getTotalEnergyKwh()))))
                 .performanceIndexDate(performanceIndex.date() != null ? performanceIndex.date().toString() : null)
-                .performanceIndexPercent(performanceIndex.indexPercent())
-                .performanceActualKwh(performanceIndex.actualKwh())
+                .performanceIndexPercent(SiteProductionPolicy.energy(site, performanceIndex.indexPercent()))
+                .performanceActualKwh(SiteProductionPolicy.energy(site, performanceIndex.actualKwh()))
                 .performanceTheoreticalKwh(performanceIndex.theoreticalKwh())
                 .performanceStatus(performanceIndex.status())
                 .note(description != null ? description.getNote() : null)
@@ -410,6 +411,7 @@ public class SiteDescriptionService {
         List<PeerYield> peerYields = siteRepository.findAllByOrderBySiteNameAsc().stream()
                 .filter(SiteAccessPolicy::isActive)
                 .filter(this::isHealthy)
+                .filter(candidate -> !SiteProductionPolicy.forcesZero(candidate))
                 .filter(candidate -> governorate.equals(productionEstimationService.governorateForSite(candidate)))
                 .map(candidate -> latestPeerYield(candidate, endDay))
                 .filter(Optional::isPresent)

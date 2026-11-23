@@ -1,5 +1,6 @@
 package com.fusionsolar.monitoring.provider.mapper;
 
+import com.fusionsolar.monitoring.util.SiteProductionPolicy;
 import com.fusionsolar.monitoring.dto.DashboardSummaryDto;
 import com.fusionsolar.monitoring.dto.DeviceItemDto;
 import com.fusionsolar.monitoring.dto.HistoryPointDto;
@@ -182,10 +183,10 @@ public class SiteMongoMapper {
                 toApiStatus(source.getStatus()),
                 nullSafeDouble(source.getInstalledPowerKw()),
                 source.getGridConnectionDate(),
-                nullSafeDouble(source.getDayEnergyKwh()),
-                nullSafeDouble(source.getMonthEnergyKwh()),
-                normalizedYearEnergyKwh(source),
-                nullSafeDouble(source.getTotalEnergyKwh()),
+                nullSafeDouble(SiteProductionPolicy.energy(source, source.getDayEnergyKwh())),
+                nullSafeDouble(SiteProductionPolicy.energy(source, source.getMonthEnergyKwh())),
+                SiteProductionPolicy.energy(source, normalizedYearEnergyKwh(source)),
+                nullSafeDouble(SiteProductionPolicy.energy(source, source.getTotalEnergyKwh())),
                 formatIsoDate(source.getSwapDate())
         );
     }
@@ -198,10 +199,10 @@ public class SiteMongoMapper {
                 toApiStatus(source.getStatus()),
                 nullSafeDouble(source.getInstalledPowerKw()),
                 source.getGridConnectionDate(),
-                nullSafeDouble(source.getDayEnergyKwh()),
-                nullSafeDouble(source.getMonthEnergyKwh()),
-                normalizedYearEnergyKwh(source),
-                nullSafeDouble(source.getTotalEnergyKwh()),
+                nullSafeDouble(SiteProductionPolicy.energy(source, source.getDayEnergyKwh())),
+                nullSafeDouble(SiteProductionPolicy.energy(source, source.getMonthEnergyKwh())),
+                SiteProductionPolicy.energy(source, normalizedYearEnergyKwh(source)),
+                nullSafeDouble(SiteProductionPolicy.energy(source, source.getTotalEnergyKwh())),
                 formatIsoDate(source.getSwapDate())
         );
     }
@@ -271,19 +272,19 @@ public class SiteMongoMapper {
                 .sum();
 
         double totalDayEnergyKwh = safeSites.stream()
-                .mapToDouble(site -> nullSafeDouble(site.getDayEnergyKwh()))
+                .mapToDouble(site -> nullSafeDouble(SiteProductionPolicy.energy(site, site.getDayEnergyKwh())))
                 .sum();
 
         double totalMonthEnergyKwh = safeSites.stream()
-                .mapToDouble(site -> nullSafeDouble(site.getMonthEnergyKwh()))
+                .mapToDouble(site -> nullSafeDouble(SiteProductionPolicy.energy(site, site.getMonthEnergyKwh())))
                 .sum();
 
         double totalYearEnergyKwh = safeSites.stream()
-                .mapToDouble(this::normalizedYearEnergyKwh)
+                .mapToDouble(site -> SiteProductionPolicy.energy(site, normalizedYearEnergyKwh(site)))
                 .sum();
 
         double totalEnergyKwh = safeSites.stream()
-                .mapToDouble(site -> nullSafeDouble(site.getTotalEnergyKwh()))
+                .mapToDouble(site -> nullSafeDouble(SiteProductionPolicy.energy(site, site.getTotalEnergyKwh())))
                 .sum();
 
         int healthySites = (int) safeSites.stream()
