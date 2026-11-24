@@ -101,6 +101,7 @@ public class PerformanceReportService {
     private final SiteEnergyKpiReconciliationService siteEnergyKpiReconciliationService;
     private final ProductionEstimationService productionEstimationService;
     private final CurrentSiteAccessService currentSiteAccessService;
+    private final com.fusionsolar.monitoring.persistence.repositories.SiteDeviceRepository siteDeviceRepository;
 
     public List<PerformanceReportRowDto> getReport(
             String period,
@@ -189,13 +190,32 @@ public class PerformanceReportService {
                 productionEnd,
                 yesterday
         );
+        // A cumulative inverter counter covers the whole installation lifetime, not the swap.
+        // Allocate it once for this filter; never add monitored history or gap estimates to it.
+        Double cumulativeKwh = completeInverterTotal(site);
+        LocalDate observationDay = yesterday.plusDays(1);
+        Double allocatedKwh = zone == null ? null
+                : com.fusionsolar.monitoring.util.LifetimeEnergyAllocation.allocate(
+                        cumulativeKwh, commissioningDate, observationDay, range.startDate(), range.endDate(),
+                        (from, to) -> productionEstimationService.theoreticalYieldPerKwc(zone, from, to));
+        boolean allocated = allocatedKwh != null;
+        if (allocated) {
+            productionStart = maxDate(range.startDate(), commissioningDate);
+            productionEnd = minDate(range.endDate(), observationDay);
+            productionDays = daysInclusive(productionStart, productionEnd);
+            filterDays = productionDays;
+            expectedKwh = !Double.isFinite(installedPowerKw) || installedPowerKw <= 0 ? null
+                    : round2(productionEstimationService.theoreticalYieldPerKwc(zone, productionStart, productionEnd) * installedPowerKw);
+            double value = round2(allocatedKwh);
+            actual = new ActualComputation(value, 0.0, value, productionDays, 0);
+        }
         boolean forcedZero = SiteProductionPolicy.forcesZero(site);
         if (forcedZero) actual = new ActualComputation(0.0, 0.0, 0.0, 0, 0);
         Double actualKwh = actual.finalKwh();
 
         boolean canCompare = expectedKwh != null && actualKwh != null;
 
-        String dataStatus = forcedZero ? "FORCED_ZERO" : swapDate == null
+        String dataStatus = forcedZero ? "FORCED_ZERO" : !allocated && swapDate == null
                 ? "MISSING_SWAP_DATE"
                 : expectedKwh == null
                 ? "MISSING_EXPECTED_KWH"
@@ -238,14 +258,23 @@ public class PerformanceReportService {
                 zone,
                 governorate,
                 expectedKwh,
-                SiteProductionPolicy.energy(site, swapDate == null ? null : round2(actual.capturedKwh())),
-                SiteProductionPolicy.energy(site, swapDate == null || actualKwh == null ? null : round2(actual.estimatedMissingKwh())),
+                SiteProductionPolicy.energy(site, !allocated && swapDate == null ? null : round2(actual.capturedKwh())),
+                SiteProductionPolicy.energy(site, (!allocated && swapDate == null) || actualKwh == null ? null : round2(actual.estimatedMissingKwh())),
                 actualKwh,
                 differenceKwh,
                 differencePercent,
                 bonusMalus,
                 dataStatus
         );
+    }
+
+    private Double completeInverterTotal(SiteDocument site) {
+        if (siteDeviceRepository == null || site.getBrand() != Brand.HUAWEI) return null;
+        return siteDeviceRepository.findByBrandAndProviderAccountGroupAndSiteCode(
+                        Brand.HUAWEI, accountGroupOf(site), site.getSiteCode())
+                .filter(doc -> java.util.Objects.equals(doc.getProviderAccountKey(), site.getProviderAccountKey()))
+                .map(doc -> com.fusionsolar.monitoring.service.sync.HuaweiInverterEnergySyncService.completeTotal(doc, Instant.now()))
+                .orElse(null);
     }
 
     private ActualComputation computeActualKwh(

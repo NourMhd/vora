@@ -262,6 +262,9 @@ public class HuaweiApiRateLimiter {
     }
 
     private long endpointDelayMs(String endpoint) {
+        if ("/thirdData/getDevRealKpi".equals(endpoint)) {
+            return Math.max(300_000L, groupMinRequestIntervalMs);
+        }
         if ("/thirdData/login".equals(endpoint)) {
             return Math.max(60_000L, loginMinRequestIntervalMs);
         }

@@ -452,112 +452,249 @@ class _DropdownFilter extends StatelessWidget {
   }
 }
 
-class _SitesContent extends StatelessWidget {
+class _SitesContent extends StatefulWidget {
   const _SitesContent({required this.controller});
   final SitesController controller;
+
+  @override
+  State<_SitesContent> createState() => _SitesContentState();
+}
+
+class _SitesContentState extends State<_SitesContent> {
+  final _horizontal = ScrollController();
+  final _vertical = ScrollController();
+
+  @override
+  void dispose() {
+    _horizontal.dispose();
+    _vertical.dispose();
+    super.dispose();
+  }
+
+  void _changePage(int page) {
+    widget.controller.goToPage(page);
+    if (_vertical.hasClients) _vertical.jumpTo(0);
+  }
+
   @override
   Widget build(BuildContext context) {
+    final controller = widget.controller;
     return Obx(() {
       final sites = controller.filteredSites;
-      if (sites.isEmpty) {
-        return const PremiumCard(
-          child: EmptyState(
-            title: 'Aucun site trouvé',
-            message:
-                'Ajuste la recherche ou les filtres pour afficher les sites.',
-            icon: Icons.search_off_rounded,
-          ),
-        );
-      }
+      final size = controller.rowsPerPage.value;
+      // All reactive pagination reads stay inside this Obx.
+      final page = controller.visiblePage;
+      final pages = sites.isEmpty ? 1 : (sites.length / size).ceil();
+      final start = page * size;
+      final end = (start + size).clamp(0, sites.length).toInt();
+      final visible = sites.sublist(start, end);
+      final exporting = controller.isExporting.value;
+      final queryKey = [
+        controller.searchQuery.value,
+        controller.selectedBrand.value,
+        controller.selectedStatus.value,
+        controller.selectedZone.value,
+        controller.selectedPlantType.value,
+        controller.selectedGovernor.value,
+        controller.sortBy.value,
+        controller.sortDirection.value,
+        controller.faultsOnly.value,
+        size,
+        page,
+      ].join('|');
+
       return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final counter = Text(
-                  '${sites.length} sites affichés',
-                  style: const TextStyle(
-                    color: AppColors.mutedText,
-                    fontWeight: FontWeight.w900,
+          Wrap(
+            spacing: 18,
+            runSpacing: 12,
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                '${sites.length} sites · ${sites.isEmpty ? 0 : start + 1}–$end affichés',
+                style: const TextStyle(
+                  color: AppColors.mutedText,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              Tooltip(
+                message:
+                    'Exporter tous les sites filtrés, sur toutes les pages',
+                child: FilledButton.icon(
+                  onPressed: exporting || sites.isEmpty
+                      ? null
+                      : controller.exportFilteredSites,
+                  icon: exporting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.download_rounded, size: 20),
+                  label: Text(
+                    exporting ? 'Export en cours...' : 'Exporter Excel',
                   ),
-                );
-                final exportButton = Obx(
-                  () => Tooltip(
-                    message:
-                        'Télécharger les sites affichés, avec les filtres et le tri actuels',
-                    child: FilledButton.icon(
-                      onPressed: controller.isExporting.value
-                          ? null
-                          : controller.exportFilteredSites,
-                      style: FilledButton.styleFrom(
-                        backgroundColor: AppColors.deepTeal,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 18,
-                          vertical: 16,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                      ),
-                      icon: controller.isExporting.value
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.download_rounded, size: 20),
-                      label: Text(
-                        controller.isExporting.value
-                            ? 'Export en cours...'
-                            : 'Exporter Excel',
-                      ),
-                    ),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppColors.deepTeal,
+                    foregroundColor: Colors.white,
                   ),
-                );
-                if (constraints.maxWidth < 480) {
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      counter,
-                      const SizedBox(height: 12),
-                      exportButton,
-                    ],
-                  );
-                }
-                return Row(
-                  children: [
-                    Expanded(child: counter),
-                    exportButton,
-                  ],
-                );
-              },
-            ),
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 12),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final columns = constraints.maxWidth >= 1280
-                  ? 3
-                  : constraints.maxWidth >= 820
-                  ? 2
-                  : 1;
-              final spacing = 16.0;
-              final width =
-                  (constraints.maxWidth - spacing * (columns - 1)) / columns;
-              return Wrap(
-                spacing: spacing,
-                runSpacing: spacing,
-                children: sites.map((site) {
-                  return SizedBox(
-                    width: width,
-                    child: _SiteCard(site: site),
-                  );
-                }).toList(),
-              );
-            },
+          Container(
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: AppColors.borderGray),
+            ),
+            child: Column(
+              children: [
+                if (sites.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(28),
+                    child: EmptyState(
+                      title: 'Aucun site trouvé',
+                      message:
+                          'Ajuste la recherche ou les filtres pour afficher les sites.',
+                      icon: Icons.search_off_rounded,
+                    ),
+                  )
+                else
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      final width = constraints.maxWidth < 1340
+                          ? 1340.0
+                          : constraints.maxWidth;
+                      final height = (visible.length * 58.0)
+                          .clamp(58.0, 580.0)
+                          .toDouble();
+                      return Scrollbar(
+                        controller: _horizontal,
+                        thumbVisibility: true,
+                        notificationPredicate: (notification) =>
+                            notification.metrics.axis == Axis.horizontal,
+                        child: SingleChildScrollView(
+                          controller: _horizontal,
+                          scrollDirection: Axis.horizontal,
+                          child: SizedBox(
+                            width: width,
+                            child: Column(
+                              children: [
+                                const _SitesTableHeader(),
+                                SizedBox(
+                                  height: height,
+                                  child: Scrollbar(
+                                    controller: _vertical,
+                                    thumbVisibility: true,
+                                    child: ListView.builder(
+                                      // Reset position when filters, sorting or pagination change.
+                                      // Silent refresh preserves the scroll position.
+                                      key: ValueKey(queryKey),
+                                      controller: _vertical,
+                                      primary: false,
+                                      padding: const EdgeInsets.only(
+                                        bottom: 12,
+                                      ),
+                                      itemExtent: 58,
+                                      itemCount: visible.length,
+                                      itemBuilder: (context, index) =>
+                                          _SiteTableRow(
+                                            site: visible[index],
+                                            governor: controller
+                                                .governorForSite(
+                                                  visible[index],
+                                                ),
+                                            alternate: index.isOdd,
+                                          ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 12,
+                  ),
+                  child: Wrap(
+                    spacing: 20,
+                    runSpacing: 8,
+                    alignment: WrapAlignment.spaceBetween,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text('Lignes par page :'),
+                          const SizedBox(width: 12),
+                          DropdownButton<int>(
+                            value: size,
+                            underline: const SizedBox.shrink(),
+                            items: const [50, 100, 200]
+                                .map(
+                                  (count) => DropdownMenuItem(
+                                    value: count,
+                                    child: Text('$count'),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (value) {
+                              if (value != null) {
+                                controller.setRowsPerPage(value);
+                                if (_vertical.hasClients) _vertical.jumpTo(0);
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('Page ${page + 1} / $pages'),
+                          const SizedBox(width: 8),
+                          IconButton(
+                            tooltip: 'Première page',
+                            onPressed: page == 0 ? null : () => _changePage(0),
+                            icon: const Icon(Icons.first_page_rounded),
+                          ),
+                          IconButton(
+                            tooltip: 'Page précédente',
+                            onPressed: page == 0
+                                ? null
+                                : () => _changePage(page - 1),
+                            icon: const Icon(Icons.chevron_left_rounded),
+                          ),
+                          IconButton(
+                            tooltip: 'Page suivante',
+                            onPressed: page + 1 >= pages
+                                ? null
+                                : () => _changePage(page + 1),
+                            icon: const Icon(Icons.chevron_right_rounded),
+                          ),
+                          IconButton(
+                            tooltip: 'Dernière page',
+                            onPressed: page + 1 >= pages
+                                ? null
+                                : () => _changePage(pages - 1),
+                            icon: const Icon(Icons.last_page_rounded),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       );
@@ -565,184 +702,156 @@ class _SitesContent extends StatelessWidget {
   }
 }
 
-class _SiteCard extends StatelessWidget {
-  const _SiteCard({required this.site});
-  final SiteSummary site;
+class _SitesTableHeader extends StatelessWidget {
+  const _SitesTableHeader();
+
   @override
   Widget build(BuildContext context) {
-    return PremiumCard(
-      onTap: () => Get.toNamed(
-        AppRoutes.siteDetailsPath(brand: site.brand, siteCode: site.siteCode),
+    return Container(
+      height: 60,
+      decoration: const BoxDecoration(
+        color: AppColors.tealSoft,
+        border: Border(bottom: BorderSide(color: AppColors.borderGray)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: const Row(
         children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: AppColors.tealSoft,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: const Icon(
-                  Icons.solar_power_rounded,
-                  color: AppColors.deepTeal,
-                ),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      site.siteName,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppColors.midnightNavy,
-                        fontSize: 17,
-                        fontWeight: FontWeight.w900,
-                        height: 1.1,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      site.siteCode,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppColors.mutedText,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              StatusBadge(status: site.status, compact: true),
-            ],
+          _TableCell(flex: 15, label: 'Nom du site', header: true),
+          _TableCell(flex: 16, label: 'Code du site', header: true),
+          _TableCell(flex: 11, label: 'Gouvernorat', header: true),
+          _TableCell(flex: 9, label: 'Marque', header: true),
+          _TableCell(flex: 10, label: 'État', header: true),
+          _TableCell(
+            flex: 14,
+            label: 'Puissance installée\n(kWc)',
+            header: true,
+            numeric: true,
           ),
-          const SizedBox(height: 18),
-          Row(
-            children: [
-              _InfoChip(label: 'Brand', value: site.brand),
-              const SizedBox(width: 8),
-              _InfoChip(
-                label: 'Power',
-                value: Formatters.power(site.installedPowerKw),
-              ),
-            ],
+          _TableCell(
+            flex: 15,
+            label: 'Production du jour\n(kWh)',
+            header: true,
+            numeric: true,
           ),
-          const SizedBox(height: 16),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: AppColors.softWhite,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: AppColors.borderGray),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: _EnergyBlock(
-                    label: 'Energy day',
-                    value: Formatters.energy(site.dayEnergyKwh),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _EnergyBlock(
-                    label: 'Energy total',
-                    value: Formatters.energy(site.totalEnergyKwh),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                const Icon(
-                  Icons.arrow_forward_rounded,
-                  color: AppColors.deepTeal,
-                ),
-              ],
-            ),
+          _TableCell(
+            flex: 15,
+            label: 'Production totale\n(kWh)',
+            header: true,
+            numeric: true,
           ),
+          _TableCell(flex: 12, label: 'Action', header: true),
         ],
       ),
     );
   }
 }
 
-class _EnergyBlock extends StatelessWidget {
-  const _EnergyBlock({required this.label, required this.value});
-  final String label;
-  final String value;
+class _SiteTableRow extends StatelessWidget {
+  const _SiteTableRow({
+    required this.site,
+    required this.governor,
+    required this.alternate,
+  });
+  final SiteSummary site;
+  final String governor;
+  final bool alternate;
+
+  void _open() => Get.toNamed(
+    AppRoutes.siteDetailsPath(brand: site.brand, siteCode: site.siteCode),
+  );
+
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(
-            color: AppColors.mutedText,
-            fontSize: 12,
-            fontWeight: FontWeight.w800,
+    return Material(
+      color: alternate ? AppColors.softWhite : Colors.white,
+      child: InkWell(
+        onTap: _open,
+        hoverColor: AppColors.tealSoft,
+        child: Container(
+          decoration: const BoxDecoration(
+            border: Border(bottom: BorderSide(color: AppColors.borderGray)),
+          ),
+          child: Row(
+            children: [
+              _TableCell(flex: 15, label: site.siteName, emphasized: true),
+              _TableCell(flex: 16, label: site.siteCode),
+              _TableCell(flex: 11, label: governor),
+              _TableCell(flex: 9, label: site.brand),
+              _TableCell(
+                flex: 10,
+                child: StatusBadge(status: site.status, compact: true),
+              ),
+              _TableCell(
+                flex: 14,
+                label: Formatters.power(site.installedPowerKw),
+                numeric: true,
+              ),
+              _TableCell(
+                flex: 15,
+                label: Formatters.energy(site.dayEnergyKwh),
+                numeric: true,
+              ),
+              _TableCell(
+                flex: 15,
+                label: Formatters.energy(site.totalEnergyKwh),
+                numeric: true,
+              ),
+              _TableCell(
+                flex: 12,
+                child: TextButton(
+                  onPressed: _open,
+                  child: const Text('Voir détails', maxLines: 1),
+                ),
+              ),
+            ],
           ),
         ),
-        const SizedBox(height: 4),
-        Text(
-          value,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(
-            color: AppColors.midnightNavy,
-            fontSize: 18,
-            fontWeight: FontWeight.w900,
-            letterSpacing: -0.5,
-          ),
-        ),
-      ],
+      ),
     );
   }
 }
 
-class _InfoChip extends StatelessWidget {
-  const _InfoChip({required this.label, required this.value});
-  final String label;
-  final String value;
+class _TableCell extends StatelessWidget {
+  const _TableCell({
+    required this.flex,
+    this.label,
+    this.child,
+    this.header = false,
+    this.numeric = false,
+    this.emphasized = false,
+  });
+  final int flex;
+  final String? label;
+  final Widget? child;
+  final bool header;
+  final bool numeric;
+  final bool emphasized;
+
   @override
   Widget build(BuildContext context) {
     return Expanded(
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: AppColors.borderGray),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              label,
-              style: const TextStyle(
-                color: AppColors.mutedText,
-                fontSize: 10,
-                fontWeight: FontWeight.w800,
+      flex: flex,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Align(
+          alignment: numeric ? Alignment.centerRight : Alignment.centerLeft,
+          child:
+              child ??
+              Tooltip(
+                message: label ?? '',
+                child: Text(
+                  label ?? '',
+                  maxLines: header ? 2 : 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: numeric ? TextAlign.right : TextAlign.left,
+                  style: TextStyle(
+                    color: AppColors.midnightNavy,
+                    fontSize: header ? 12 : 13,
+                    fontWeight: header || emphasized
+                        ? FontWeight.w800
+                        : FontWeight.w600,
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(height: 3),
-            Text(
-              value,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: AppColors.midnightNavy,
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-          ],
         ),
       ),
     );
