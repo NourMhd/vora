@@ -37,6 +37,10 @@ public class SiteDeviceDocument {
 
     private List<DeviceItemDto> devices;
 
+    // Latest complete device observations, kept separate from station history.
+    private java.util.Map<String, Double> inverterTotalKwh;
+    private java.util.Map<String, Instant> inverterTotalObservedAt;
+
     private Instant lastSyncAt;
 
     private Instant createdAt;

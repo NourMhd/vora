@@ -40,6 +40,29 @@ class SitesController extends GetxController {
 
   final faultsOnly = false.obs;
 
+  final rowsPerPage = 50.obs;
+  final currentPage = 0.obs;
+  Worker? _paginationWorker;
+
+  int get pageCount {
+    final count = filteredSites.length;
+    return count == 0 ? 1 : (count / rowsPerPage.value).ceil();
+  }
+
+  int get visiblePage => currentPage.value.clamp(0, pageCount - 1).toInt();
+
+  void setRowsPerPage(int value) {
+    if (![50, 100, 200].contains(value)) return;
+    rowsPerPage.value = value;
+    currentPage.value = 0;
+  }
+
+  void goToPage(int value) {
+    currentPage.value = value.clamp(0, pageCount - 1).toInt();
+  }
+
+  String governorForSite(SiteSummary site) => _governorForSite(site) ?? '—';
+
   Timer? _autoRefreshTimer;
   bool _fetchInFlight = false;
 
@@ -78,6 +101,17 @@ class SitesController extends GetxController {
       selectedStatus.value = args['status'].toString();
     }
 
+    _paginationWorker = everAll([
+      searchQuery,
+      selectedBrand,
+      selectedStatus,
+      selectedZone,
+      selectedPlantType,
+      selectedGovernor,
+      sortBy,
+      sortDirection,
+      faultsOnly,
+    ], (_) => currentPage.value = 0);
     load();
     _startAutoRefresh();
   }
@@ -85,6 +119,7 @@ class SitesController extends GetxController {
   @override
   void onClose() {
     _autoRefreshTimer?.cancel();
+    _paginationWorker?.dispose();
     super.onClose();
   }
 
@@ -142,6 +177,7 @@ class SitesController extends GetxController {
       final availableBrands = responses[1] as List<String>;
 
       sites.assignAll(allSites);
+      currentPage.value = visiblePage;
 
       final brandList = availableBrands.isEmpty
           ? allSites.map((site) => site.brand).toSet().toList()

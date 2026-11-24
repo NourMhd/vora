@@ -9,7 +9,7 @@ import java.time.*; import java.util.*; import java.lang.reflect.*;
 class PerformanceReportSwapTests {
  static int checks;
  static void eq(Object a,Object b) { checks++; if(!Objects.equals(a,b))throw new AssertionError(a+" != "+b); }
- static final PerformanceReportService service=new PerformanceReportService(null,null,null,new ProductionEstimationService(),null);
+ static final PerformanceReportService service=new PerformanceReportService(null,null,null,new ProductionEstimationService(),null,null);
  static SiteDocument site=new SiteDocument();
  static Method toRow,load; static Constructor<?> ctor;
  static PerformanceReportRowDto row(LocalDate start,LocalDate end,LocalDate yesterday,Map<LocalDate,Double> values)throws Exception{

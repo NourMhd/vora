@@ -76,7 +76,7 @@ class SiteProductionOverrideTests {
     }
     @Test void reportShowsZeroEvenWithoutSwapAndLeavesTheoreticalForNormalSites() throws Exception {
         var doc = document("SFA_0138"); doc.setSwapDate(null);
-        var report = new PerformanceReportService(null, null, null, service, null);
+        var report = new PerformanceReportService(null, null, null, service, null, null);
         var rangeClass = Class.forName(PerformanceReportService.class.getName() + "$ReportRange");
         var constructor = rangeClass.getDeclaredConstructor(LocalDate.class, LocalDate.class);
         constructor.setAccessible(true);

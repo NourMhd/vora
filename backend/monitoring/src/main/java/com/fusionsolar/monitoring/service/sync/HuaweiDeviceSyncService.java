@@ -91,15 +91,20 @@ private long delayBetweenBatchesMs;
         return;
     }
 
-    List<String> cachedSiteIdentities = siteDeviceRepository.findAllByBrand(Brand.HUAWEI).stream()
+    Map<String, Instant> cachedAt = siteDeviceRepository.findAllByBrand(Brand.HUAWEI).stream()
             .filter(doc -> doc.getSiteCode() != null && !doc.getSiteCode().isBlank())
-            .map(doc -> identity(doc.getProviderAccountGroup(), doc.getProviderAccountKey(), doc.getSiteCode()))
-            .toList();
-
+            .collect(Collectors.toMap(
+                    doc -> identity(doc.getProviderAccountGroup(), doc.getProviderAccountKey(), doc.getSiteCode()),
+                    doc -> doc.getLastSyncAt() == null ? Instant.EPOCH : doc.getLastSyncAt(),
+                    (left, right) -> left.isAfter(right) ? left : right));
+    Instant refreshBefore = nowCheck.minus(DEVICE_CACHE_TTL);
     List<SiteDocument> sites = allSites.stream()
+            .filter(site -> !Boolean.FALSE.equals(site.getActive()))
             .filter(site -> site.getSiteCode() != null && !site.getSiteCode().isBlank())
-            .filter(site -> force || !cachedSiteIdentities.contains(identity(site.getProviderAccountGroup(), site.getProviderAccountKey(), site.getSiteCode())))
-            .limit(batchSize)
+            .filter(site -> force || cachedAt.getOrDefault(identity(site.getProviderAccountGroup(), site.getProviderAccountKey(), site.getSiteCode()), Instant.EPOCH).isBefore(refreshBefore))
+            .sorted(java.util.Comparator.comparing(site -> cachedAt.getOrDefault(
+                    identity(site.getProviderAccountGroup(), site.getProviderAccountKey(), site.getSiteCode()), Instant.EPOCH)))
+            .limit(Math.max(1, Math.min(100, batchSize)))
             .toList();
 
     if (sites.isEmpty()) {

@@ -75,7 +75,7 @@ class _PerformanceHeader extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Tooltip(
-message: 'Jours absents, à zéro ou invalides : moyenne des jours positifs du meilleur site du même gouvernorat, adaptée à la puissance. Sans référence : théorique du jour. Période limitée par le swap et hier.',                    child: Text(
+message: 'Production calculée pour la période sélectionnée, dans les limites des dates de production disponibles.',                    child: Text(
                       'Suivi production',
                       style: TextStyle(
                         color: AppColors.midnightNavy,
@@ -571,12 +571,11 @@ class _PerformanceTableState extends State<_PerformanceTable> {
         xlsx.TextCellValue('Marque'),
         xlsx.TextCellValue('Date filtre début'),
         xlsx.TextCellValue('Date filtre fin'),
-        xlsx.TextCellValue('Date swap'),
         xlsx.TextCellValue('Date mise en service'),
         xlsx.TextCellValue('Jours filtre'),
         xlsx.TextCellValue('Jours production'),
-        xlsx.TextCellValue('Jours réels valides (> 0 kWh)'),
-        xlsx.TextCellValue('Jours estimés (absents, nuls ou invalides)'),
+        xlsx.TextCellValue('Jours couverts'),
+        xlsx.TextCellValue('Jours à compléter'),
         xlsx.TextCellValue('RT/GF'),
         xlsx.TextCellValue('Zone'),
         xlsx.TextCellValue('kWh prévu'),
@@ -598,7 +597,6 @@ class _PerformanceTableState extends State<_PerformanceTable> {
           xlsx.TextCellValue(row.brand),
           xlsx.TextCellValue(_displayIsoDate(row.filterStartDate)),
           xlsx.TextCellValue(_displayIsoDate(row.filterEndDate)),
-          xlsx.TextCellValue(_displayIsoDate(row.swapDate)),
           xlsx.TextCellValue(_displayIsoDate(row.gridConnectionDate)),
           row.hasMissingSwapDate ? xlsx.TextCellValue('Indisponible') : xlsx.IntCellValue(row.filterDaysCount),
           row.hasMissingSwapDate ? xlsx.TextCellValue('Indisponible') : xlsx.IntCellValue(row.productionDaysCount),
@@ -768,10 +766,9 @@ class _PerformanceTableHeader extends StatelessWidget {
           _HeaderCell('Nom site', flex: 22, alignment: Alignment.centerLeft),
           _HeaderCell('Puissance\ncrête', flex: 12, alignment: Alignment.centerRight),
           _HeaderCell('Statut', flex: 11, alignment: Alignment.center),
-          _HeaderCell('Swap', flex: 11, alignment: Alignment.center),
           _HeaderCell('MES', flex: 11, alignment: Alignment.center),
           _HeaderCell('Jours filtre', flex: 9, alignment: Alignment.centerRight),
-_HeaderCell('Jours prod.\nValides / Estimés', flex: 11, alignment: Alignment.centerRight),
+_HeaderCell('Jours prod.\nCouverts / À compléter', flex: 11, alignment: Alignment.centerRight),
           _HeaderCell('RT/GF', flex: 8, alignment: Alignment.center),
           _HeaderCell('Zone', flex: 10, alignment: Alignment.centerLeft),
           _HeaderCell('kWh prévu', flex: 15, alignment: Alignment.centerRight),
@@ -845,16 +842,6 @@ class _PerformanceTableRow extends StatelessWidget {
             flex: 11,
             alignment: Alignment.center,
             child: StatusBadge(status: row.siteStatus, compact: true),
-          ),
-          _ValueCell(
-            flex: 11,
-            alignment: Alignment.center,
-            child: Text(
-              _displayIsoDate(row.swapDate),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: _cellTextStyle(fontWeight: FontWeight.w800),
-            ),
           ),
           _ValueCell(
             flex: 11,

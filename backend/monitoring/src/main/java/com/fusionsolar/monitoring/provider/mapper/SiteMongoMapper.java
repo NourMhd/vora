@@ -223,6 +223,8 @@ public class SiteMongoMapper {
                 .providerAccountGroup(existing != null ? existing.getProviderAccountGroup() : null)
                 .siteCode(siteCode)
                 .devices(devices != null ? devices : List.of())
+                .inverterTotalKwh(existing != null ? existing.getInverterTotalKwh() : null)
+                .inverterTotalObservedAt(existing != null ? existing.getInverterTotalObservedAt() : null)
                 .lastSyncAt(effectiveNow)
                 .createdAt(existing != null ? existing.getCreatedAt() : effectiveNow)
                 .updatedAt(effectiveNow)
