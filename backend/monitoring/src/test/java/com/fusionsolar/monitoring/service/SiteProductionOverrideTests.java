@@ -75,7 +75,7 @@ class SiteProductionOverrideTests {
         eq(SiteProductionPolicy.history(document("SFA_0139"), points).get(0).getValue(), 99.0);
     }
     @Test void reportShowsZeroEvenWithoutSwapAndLeavesTheoreticalForNormalSites() throws Exception {
-        var doc = document("SFA_0138"); doc.setSwapDate(null);
+        var doc = document("SFA_0138"); doc.setSwapDate(null); doc.setGridConnectionDate(day.toString());
         var report = new PerformanceReportService(null, null, null, service, null, null);
         var rangeClass = Class.forName(PerformanceReportService.class.getName() + "$ReportRange");
         var constructor = rangeClass.getDeclaredConstructor(LocalDate.class, LocalDate.class);
@@ -91,7 +91,7 @@ class SiteProductionOverrideTests {
     }
     @Test void bothComparisonTablesShowZeroInsteadOfAMissingValue() throws Exception {
         var comparison = new DailyComparisonService(null, null, service, null);
-        var doc = document("SFA_0138"); doc.setSwapDate(null);
+        var doc = document("SFA_0138"); doc.setSwapDate(null); doc.setGridConnectionDate(day.toString());
         var production = daily(doc, 999.0);
         var historical = DailyComparisonService.class.getDeclaredMethod("historicalCell",
                 ProductionEstimationService.DailySiteProduction.class, LocalDate.class);

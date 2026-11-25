@@ -60,7 +60,9 @@ class PerformanceReportRow {
   bool get isBonus => bonusMalus.toUpperCase() == 'BONUS';
   bool get isMalus => bonusMalus.toUpperCase() == 'MALUS';
   bool get hasMissingSwapDate => dataStatus == 'MISSING_SWAP_DATE';
-  bool get hasMissingData => hasMissingSwapDate || dataStatus == 'MISSING_EXPECTED_KWH' || dataStatus == 'MISSING_REAL_KWH';
+  bool get hasMissingOriginDate => dataStatus == 'MISSING_ORIGIN_DATE';
+  bool get hasMissingProductionDates => hasMissingOriginDate || hasMissingSwapDate;
+  bool get hasMissingData => hasMissingProductionDates || dataStatus == 'MISSING_EXPECTED_KWH' || dataStatus == 'MISSING_REAL_KWH';
   bool get hasEstimatedSwapGap => estimatedDaysCount > 0 && (estimatedMissingKwh ?? 0) > 0;
 
   factory PerformanceReportRow.fromJson(Map<String, dynamic> json) {

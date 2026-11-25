@@ -35,7 +35,7 @@ class PerformanceReportSwapTests {
   r=row(start,end,end,Map.of());eq(r.getActualKwh(),560.0);eq(r.getEstimatedMissingKwh(),560.0);eq(r.getEstimatedDaysCount(),21);
   site.setSwapDate(end.plusDays(1));r=row(start,end,end,Map.of());eq(r.getProductionDaysCount(),0);eq(r.getActualKwh(),null);
   site.setSwapDate(null);r=row(start,end,end,Map.of(start,20.0));
-  eq(r.getExpectedKwh(),null);eq(r.getCapturedKwh(),null);eq(r.getEstimatedMissingKwh(),null);eq(r.getActualKwh(),null);eq(r.getDataStatus(),"MISSING_SWAP_DATE");
+  eq(r.getExpectedKwh(),null);eq(r.getCapturedKwh(),null);eq(r.getEstimatedMissingKwh(),null);eq(r.getActualKwh(),null);eq(r.getDataStatus(),"MISSING_ORIGIN_DATE");
   site.setSwapDate(LocalDate.of(2026,1,1));site.setGridConnectionDate("2026-02-01");
   r=row(LocalDate.of(2025,5,1),LocalDate.of(2026,5,1),LocalDate.of(2026,5,1),Map.of());
   eq(r.getProductionDaysCount(),121);eq(r.getProductionStartDate(),"2026-01-01");

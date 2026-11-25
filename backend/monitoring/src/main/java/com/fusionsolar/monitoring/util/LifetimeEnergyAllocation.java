@@ -7,16 +7,25 @@ import java.util.function.ToDoubleBiFunction;
 public final class LifetimeEnergyAllocation {
     private LifetimeEnergyAllocation() {}
 
-    public static Double allocate(Double totalKwh, LocalDate commissioned, LocalDate observedDay,
+    /** Earliest available date; neither date has priority over the other. */
+    public static LocalDate origin(LocalDate swap, LocalDate commissioning) {
+        if (swap == null) return commissioning;
+        if (commissioning == null) return swap;
+        return swap.isBefore(commissioning) ? swap : commissioning;
+    }
+
+    public static Double allocate(Double totalKwh, LocalDate origin, LocalDate observedDay,
             LocalDate filterStart, LocalDate filterEnd,
             ToDoubleBiFunction<LocalDate, LocalDate> theoreticalYield) {
         if (totalKwh == null || !Double.isFinite(totalKwh) || totalKwh < 0
-                || commissioned == null || observedDay == null || observedDay.isBefore(commissioned)
+                || origin == null || observedDay == null
                 || filterStart == null || filterEnd == null || filterEnd.isBefore(filterStart)) return null;
-        LocalDate start = filterStart.isAfter(commissioned) ? filterStart : commissioned;
+        if (filterEnd.isBefore(origin)) return 0.0;
+        if (observedDay.isBefore(origin)) return null;
+        LocalDate start = filterStart.isAfter(origin) ? filterStart : origin;
         LocalDate end = filterEnd.isBefore(observedDay) ? filterEnd : observedDay;
         if (end.isBefore(start)) return 0.0;
-        double denominator = theoreticalYield.applyAsDouble(commissioned, observedDay);
+        double denominator = theoreticalYield.applyAsDouble(origin, observedDay);
         double numerator = theoreticalYield.applyAsDouble(start, end);
         if (!Double.isFinite(denominator) || denominator <= 0 || !Double.isFinite(numerator)
                 || numerator < 0 || numerator > denominator + 1e-6) return null;
