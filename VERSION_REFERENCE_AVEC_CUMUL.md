@@ -1,3 +1,5 @@
+> Mise à jour du 25/11/2026 : les règles de dates de ce document historique sont remplacées par REGLES_ORIGINE_CUMUL.md.
+
 # Version de référence + cumul des onduleurs disponible
 
 Base : MonitoringSites(20261124-113336)(1).zip, version fournie comme référence

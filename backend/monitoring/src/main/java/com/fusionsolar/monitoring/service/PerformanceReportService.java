@@ -169,10 +169,13 @@ public class PerformanceReportService {
         LocalDate swapDate = site.getSwapDate();
         LocalDate commissioningDate = parseFlexibleDate(site.getGridConnectionDate());
 
-        final LocalDate productionStart = swapDate != null
+        LocalDate origin = com.fusionsolar.monitoring.util.LifetimeEnergyAllocation.origin(swapDate, commissioningDate);
+        if (origin == null) return missingDatesRow(site, range, plantType, zone, governorate);
+
+        LocalDate productionStart = swapDate != null
                 ? maxDate(range.startDate(), swapDate)
                 : null;
-        final LocalDate productionEnd = effectiveFilterEnd;
+        LocalDate productionEnd = effectiveFilterEnd;
 
         int productionDays = daysInclusive(productionStart, productionEnd);
         // Report days use the same swap-bounded period as both energy calculations.
@@ -190,21 +193,21 @@ public class PerformanceReportService {
                 productionEnd,
                 yesterday
         );
-        // Keep the existing report window and theoretical expectation independent
-        // of inverter cache availability. Only the measured energy may be replaced.
+        // The cumulative counter uses the earliest available MES/swap date.
+        // The legacy forecast above is deliberately never recalculated here.
         LocalDate observationDay = yesterday.plusDays(1);
-        boolean coherentLifetime = commissioningDate != null && swapDate != null
-                && !commissioningDate.isAfter(swapDate)
-                && !commissioningDate.isAfter(observationDay);
-        boolean validWindow = expectedKwh != null && productionStart != null && productionEnd != null
-                && !productionEnd.isBefore(productionStart);
-        Double cumulativeKwh = coherentLifetime && validWindow ? completeInverterTotal(site) : null;
-        Double allocatedKwh = zone == null || cumulativeKwh == null ? null
+        boolean validPower = Double.isFinite(installedPowerKw) && installedPowerKw > 0;
+        Double cumulativeKwh = validPower && zone != null ? completeInverterTotal(site) : null;
+        Double allocatedKwh = cumulativeKwh == null ? null
                 : com.fusionsolar.monitoring.util.LifetimeEnergyAllocation.allocate(
-                        cumulativeKwh, commissioningDate, observationDay, productionStart, productionEnd,
+                        cumulativeKwh, origin, observationDay, range.startDate(), effectiveFilterEnd,
                         (from, to) -> productionEstimationService.theoreticalYieldPerKwc(zone, from, to));
         boolean allocated = allocatedKwh != null;
         if (allocated) {
+            productionStart = maxDate(range.startDate(), origin);
+            productionEnd = effectiveFilterEnd;
+            productionDays = daysInclusive(productionStart, productionEnd);
+            filterDays = productionDays;
             double value = round2(allocatedKwh);
             actual = new ActualComputation(value, 0.0, value, productionDays, 0);
         }
@@ -214,7 +217,7 @@ public class PerformanceReportService {
 
         boolean canCompare = expectedKwh != null && actualKwh != null;
 
-        String dataStatus = forcedZero ? "FORCED_ZERO" : swapDate == null
+        String dataStatus = forcedZero ? "FORCED_ZERO" : !allocated && swapDate == null
                 ? "MISSING_SWAP_DATE"
                 : expectedKwh == null
                 ? "MISSING_EXPECTED_KWH"
@@ -257,14 +260,30 @@ public class PerformanceReportService {
                 zone,
                 governorate,
                 expectedKwh,
-                SiteProductionPolicy.energy(site, swapDate == null ? null : round2(actual.capturedKwh())),
-                SiteProductionPolicy.energy(site, swapDate == null || actualKwh == null ? null : round2(actual.estimatedMissingKwh())),
+                SiteProductionPolicy.energy(site, !allocated && swapDate == null ? null : round2(actual.capturedKwh())),
+                SiteProductionPolicy.energy(site, (!allocated && swapDate == null) || actualKwh == null ? null : round2(actual.estimatedMissingKwh())),
                 actualKwh,
                 differenceKwh,
                 differencePercent,
                 bonusMalus,
                 dataStatus
         );
+    }
+
+    /** No report energy or day calculation is permitted without either origin date. */
+    private PerformanceReportRowDto missingDatesRow(SiteDocument site, ReportRange range,
+            String plantType, String zone, String governorate) {
+        return new PerformanceReportRowDto(
+                site.getBrand() == null ? null : site.getBrand().name(),
+                site.getSiteCode(), site.getSiteName(),
+                site.getStatus() == null ? "UNKNOWN" : site.getStatus().name(),
+                site.getInstalledPowerKw(),
+                null, null, null, null, null,
+                formatIsoDate(range.startDate()), formatIsoDate(range.endDate()),
+                null, null, null, null,
+                plantType, zone, governorate,
+                null, null, null, null, null, null,
+                "N/A", "MISSING_ORIGIN_DATE");
     }
 
     private Double completeInverterTotal(SiteDocument site) {
@@ -462,7 +481,8 @@ public class PerformanceReportService {
         Map<LocalDate, Double> valuesByDate = new HashMap<>();
         Set<LocalDate> presentDates = new HashSet<>();
 
-        if (site != null && startDate != null && endDate != null && !endDate.isBefore(startDate)) {
+        if (site != null && (site.getSwapDate() != null || parseFlexibleDate(site.getGridConnectionDate()) != null)
+                && startDate != null && endDate != null && !endDate.isBefore(startDate)) {
             YearMonth cursor = YearMonth.from(startDate);
             YearMonth endMonth = YearMonth.from(endDate);
 

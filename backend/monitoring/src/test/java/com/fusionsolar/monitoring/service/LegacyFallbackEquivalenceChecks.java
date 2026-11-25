@@ -8,7 +8,7 @@ import java.lang.reflect.*;
 import java.time.*;
 import java.util.*;
 
-/** Every legacy result field must be preserved when the lifetime counter is unusable. */
+/** Legacy fields are preserved on fallback; no origin date now means unavailable. */
 public class LegacyFallbackEquivalenceChecks {
     private static long assertions;
     private static PerformanceReportRowDto row(Object service,SiteDocument site,
@@ -54,7 +54,14 @@ public class LegacyFallbackEquivalenceChecks {
             cache.setInverterTotalObservedAt(Map.of("1",now,"2",now.minusSeconds(1201)));
             Map<LocalDate,Double> values=Map.of(LocalDate.of(2025,12,15),12.0,LocalDate.of(2025,12,16),0.0);
             var daily=new ProductionEstimationService.DailySiteProduction(site,"TEST","TUN_TEST","TUN","Zone A",power,swap,values,values.keySet());
-            identical(row(baseline,site,daily,start,end,yesterday),row(candidate,site,daily,start,end,yesterday));cases++;
+            if (swap == null && mes == null) {
+                var missing = row(candidate,site,daily,start,end,yesterday);
+                if (!"MISSING_ORIGIN_DATE".equals(missing.getDataStatus()) || missing.getActualKwh() != null
+                        || missing.getExpectedKwh() != null) throw new AssertionError("No dates must be unavailable");
+            } else {
+                identical(row(baseline,site,daily,start,end,yesterday),row(candidate,site,daily,start,end,yesterday));
+            }
+            cases++;
         }
         // Even a fresh complete counter must not bypass the old power/date conditions.
         cache.setInverterTotalKwh(Map.of("1",100.0,"2",200.0));

@@ -1,3 +1,5 @@
+> Mise à jour du 25/11/2026 : les règles de dates de ce document historique sont remplacées par REGLES_ORIGINE_CUMUL.md.
+
 # Correctif Huawei — répartition du cumul par période
 
 Le rapport « Suivi production » utilise, quand toutes les valeurs sont disponibles,
