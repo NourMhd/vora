@@ -22,7 +22,7 @@ public class HuaweiLifetimeReportChecks {
     public static void main(String[] args) throws Exception {
         var site=new SiteDocument(); site.setBrand(Brand.HUAWEI); site.setProviderAccountKey("primary");
         site.setProviderAccountGroup("primary"); site.setSiteCode("NE=TEST"); site.setSiteName("ARI_TEST");
-        site.setGridConnectionDate("2025-01-01"); site.setInstalledPowerKw(10.0);
+        site.setGridConnectionDate("2025-01-01"); site.setSwapDate(LocalDate.of(2025,1,1)); site.setInstalledPowerKw(10.0);
         var now=Instant.now();
         var cache=SiteDeviceDocument.builder().brand(Brand.HUAWEI).providerAccountKey("primary")
                 .siteCode(site.getSiteCode()).devices(List.of(inverter("1",1),inverter("2",38),inverter("3",17),inverter("1",1)))
@@ -45,9 +45,9 @@ public class HuaweiLifetimeReportChecks {
         eq(row.getCapturedDaysCount(),31);eq(row.getEstimatedDaysCount(),0);eq(row.getDataStatus(),"OK");
         eq(row.getProductionStartDate(),"2025-01-01");eq(row.getExpectedKwh(),735.0);
         row=(PerformanceReportRowDto)method.invoke(service,site,ctor.newInstance(janEnd.plusDays(1),febEnd),febEnd.minusDays(1),null,List.of());
-        eq(row.getCapturedKwh(),890.0);eq(row.getProductionEndDate(),"2025-02-28");
+        eq(row.getCapturedKwh(),855.0);eq(row.getProductionEndDate(),"2025-02-27");
         row=(PerformanceReportRowDto)method.invoke(service,site,ctor.newInstance(jan,febEnd),febEnd.minusDays(1),null,List.of());
-        eq(row.getCapturedKwh(),1625.0);eq(row.getActualKwh(),1625.0);
+        eq(row.getCapturedKwh(),1590.0);eq(row.getActualKwh(),1590.0);
         // Missing a second counter never yields a partial sum; normal history takes over.
         cache.setInverterTotalKwh(Map.of("1",1000.0));
         eq(HuaweiInverterEnergySyncService.completeTotal(cache,now),null);

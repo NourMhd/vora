@@ -169,17 +169,17 @@ public class PerformanceReportService {
         LocalDate swapDate = site.getSwapDate();
         LocalDate commissioningDate = parseFlexibleDate(site.getGridConnectionDate());
 
-        LocalDate productionStart = swapDate != null
+        final LocalDate productionStart = swapDate != null
                 ? maxDate(range.startDate(), swapDate)
                 : null;
-        LocalDate productionEnd = effectiveFilterEnd;
+        final LocalDate productionEnd = effectiveFilterEnd;
 
         int productionDays = daysInclusive(productionStart, productionEnd);
         // Report days use the same swap-bounded period as both energy calculations.
         filterDays = productionDays;
         double installedPowerKw = safeDouble(site.getInstalledPowerKw());
 
-        Double expectedKwh = zone == null || !Double.isFinite(installedPowerKw) || installedPowerKw <= 0 || productionStart == null
+        final Double expectedKwh = zone == null || !Double.isFinite(installedPowerKw) || installedPowerKw <= 0 || productionStart == null
                 ? null
                 : round2(productionEstimationService.theoreticalYieldPerKwc(zone, productionStart, productionEnd) * installedPowerKw);
 
@@ -190,22 +190,21 @@ public class PerformanceReportService {
                 productionEnd,
                 yesterday
         );
-        // A cumulative inverter counter covers the whole installation lifetime, not the swap.
-        // Allocate it once for this filter; never add monitored history or gap estimates to it.
-        Double cumulativeKwh = completeInverterTotal(site);
+        // Keep the existing report window and theoretical expectation independent
+        // of inverter cache availability. Only the measured energy may be replaced.
         LocalDate observationDay = yesterday.plusDays(1);
-        Double allocatedKwh = zone == null ? null
+        boolean coherentLifetime = commissioningDate != null && swapDate != null
+                && !commissioningDate.isAfter(swapDate)
+                && !commissioningDate.isAfter(observationDay);
+        boolean validWindow = expectedKwh != null && productionStart != null && productionEnd != null
+                && !productionEnd.isBefore(productionStart);
+        Double cumulativeKwh = coherentLifetime && validWindow ? completeInverterTotal(site) : null;
+        Double allocatedKwh = zone == null || cumulativeKwh == null ? null
                 : com.fusionsolar.monitoring.util.LifetimeEnergyAllocation.allocate(
-                        cumulativeKwh, commissioningDate, observationDay, range.startDate(), range.endDate(),
+                        cumulativeKwh, commissioningDate, observationDay, productionStart, productionEnd,
                         (from, to) -> productionEstimationService.theoreticalYieldPerKwc(zone, from, to));
         boolean allocated = allocatedKwh != null;
         if (allocated) {
-            productionStart = maxDate(range.startDate(), commissioningDate);
-            productionEnd = minDate(range.endDate(), observationDay);
-            productionDays = daysInclusive(productionStart, productionEnd);
-            filterDays = productionDays;
-            expectedKwh = !Double.isFinite(installedPowerKw) || installedPowerKw <= 0 ? null
-                    : round2(productionEstimationService.theoreticalYieldPerKwc(zone, productionStart, productionEnd) * installedPowerKw);
             double value = round2(allocatedKwh);
             actual = new ActualComputation(value, 0.0, value, productionDays, 0);
         }
@@ -215,7 +214,7 @@ public class PerformanceReportService {
 
         boolean canCompare = expectedKwh != null && actualKwh != null;
 
-        String dataStatus = forcedZero ? "FORCED_ZERO" : !allocated && swapDate == null
+        String dataStatus = forcedZero ? "FORCED_ZERO" : swapDate == null
                 ? "MISSING_SWAP_DATE"
                 : expectedKwh == null
                 ? "MISSING_EXPECTED_KWH"
@@ -258,8 +257,8 @@ public class PerformanceReportService {
                 zone,
                 governorate,
                 expectedKwh,
-                SiteProductionPolicy.energy(site, !allocated && swapDate == null ? null : round2(actual.capturedKwh())),
-                SiteProductionPolicy.energy(site, (!allocated && swapDate == null) || actualKwh == null ? null : round2(actual.estimatedMissingKwh())),
+                SiteProductionPolicy.energy(site, swapDate == null ? null : round2(actual.capturedKwh())),
+                SiteProductionPolicy.energy(site, swapDate == null || actualKwh == null ? null : round2(actual.estimatedMissingKwh())),
                 actualKwh,
                 differenceKwh,
                 differencePercent,
