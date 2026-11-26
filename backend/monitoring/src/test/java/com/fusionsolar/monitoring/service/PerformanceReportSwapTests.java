@@ -48,11 +48,11 @@ class PerformanceReportSwapTests {
   var target = new DailySiteProduction(site,"ARI_1","ARI_1","ARI","Zone A",10,swap,Map.of(),Set.of());
   r=(PerformanceReportRowDto)toRow.invoke(service,site,ctor.newInstance(start,end),end,target,List.of(target,peer));
   eq(r.getActualKwh(),1260.0); eq(r.getCapturedDaysCount(),0);eq(r.getEstimatedDaysCount(),21);
-  var collect=PerformanceReportService.class.getDeclaredMethod("collectDailyValues",SiteDocument.class,List.class,LocalDate.class,LocalDate.class,Map.class,Set.class);
+  var collect=PerformanceReportService.class.getDeclaredMethod("collectDailyValues",SiteDocument.class,List.class,LocalDate.class,LocalDate.class,Map.class,Set.class,Map.class);
   collect.setAccessible(true);
   Map<LocalDate,Double> loadedValues = new HashMap<>();
   collect.invoke(service,site,List.of(new com.fusionsolar.monitoring.dto.HistoryPointDto(
-    start.atStartOfDay(ZoneId.of("Africa/Tunis")).toInstant().toEpochMilli(),9.999)),start,end,loadedValues,new HashSet<LocalDate>());
+    start.atStartOfDay(ZoneId.of("Africa/Tunis")).toInstant().toEpochMilli(),9.999)),start,end,loadedValues,new HashSet<LocalDate>(),new HashMap<>());
   eq(loadedValues.get(start),9.999);
   load=PerformanceReportService.class.getDeclaredMethod("loadSiteProduction",SiteDocument.class,LocalDate.class,LocalDate.class);load.setAccessible(true);
   var loaded=(DailySiteProduction)load.invoke(service,site,null,null);eq(loaded.swapDate(),site.getSwapDate());

@@ -166,8 +166,8 @@ public class ProductionEstimationService {
     }
 
     /**
-     * Production report only: replace absent/invalid days and yields strictly below
-     * 1 kWh/kWc with the best same-governorate site's valid-day average.
+     * Production report only: replace absent, invalid or zero days with the
+     * best same-governorate site's positive-day average.
      * Each candidate uses the common filter, bounded by its own swap date.
      * With no valid reference, use the target's daily theoretical production.
      * The independent daily-comparison policy below is unchanged.
@@ -230,15 +230,16 @@ public class ProductionEstimationService {
         return Double.isFinite(power) && power > 0;
     }
 
-    /** Compare before rounding: exactly 1 kWh/kWc is valid. */
+    /** Any finite strictly positive daily measurement is valid. */
     private Double validReportValue(DailySiteProduction site, LocalDate day) {
         if (!validReportPower(site.installedPowerKw()) || !isProductionDay(site, day)
                 || site.valuesByDate() == null) {
             return null;
         }
         Double value = site.valuesByDate().get(day);
-        return value != null && Double.isFinite(value) && value > 0
-        ? value : null;
+        return value != null && Double.isFinite(value)
+                && value > 0
+                ? value : null;
     }
 
     private Double reportAverageYield(DailySiteProduction site, LocalDate start, LocalDate end) {
@@ -251,7 +252,7 @@ public class ProductionEstimationService {
         LocalDate firstDay = start.isAfter(site.swapDate()) ? start : site.swapDate();
         for (LocalDate day = firstDay; !day.isAfter(end); day = day.plusDays(1)) {
             Double value = validReportValue(site, day);
-            if (value != null) {
+            if (value != null && value > 0) {
                 sum += value;
                 count++;
             }
@@ -477,6 +478,13 @@ public class ProductionEstimationService {
         return !day.isBefore(site.swapDate());
     }
 
+    /** Unrounded measurement for report classification and aggregation. */
+    public Double rawReportValue(DailySiteProduction site, LocalDate day) {
+        if (site == null || day == null || site.valuesByDate() == null) return null;
+        Double value = site.valuesByDate().get(day);
+        return value != null && Double.isFinite(value) && value >= 0 ? value : null;
+    }
+
     public Double valueForDay(DailySiteProduction site, LocalDate day) {
         if (site == null || day == null || site.valuesByDate() == null) {
             return null;
@@ -669,6 +677,16 @@ public class ProductionEstimationService {
     private record EstimationBasis(MonitoredStats targetStats, Double peerDailyKwh) {
     }
 
+    public enum DailyCoverage {
+        COMPLETE, PARTIAL;
+
+        static DailyCoverage fromHistoryStatus(String status) {
+            if ("COMPLETE".equalsIgnoreCase(status)) return COMPLETE;
+            if ("PARTIAL".equalsIgnoreCase(status)) return PARTIAL;
+            return null;
+        }
+    }
+
     public record DailySiteProduction(
             SiteDocument document,
             String siteCode,
@@ -678,8 +696,15 @@ public class ProductionEstimationService {
             double installedPowerKw,
             LocalDate swapDate,
             Map<LocalDate, Double> valuesByDate,
-            Set<LocalDate> presentDates
+            Set<LocalDate> presentDates,
+            Map<LocalDate, DailyCoverage> coverageByDate
     ) {
+        public DailySiteProduction(SiteDocument document, String siteCode, String siteName,
+                String governorate, String zone, double installedPowerKw, LocalDate swapDate,
+                Map<LocalDate, Double> valuesByDate, Set<LocalDate> presentDates) {
+            this(document, siteCode, siteName, governorate, zone, installedPowerKw, swapDate,
+                    valuesByDate, presentDates, Map.of());
+        }
     }
 
     public record DailyProductionDecision(

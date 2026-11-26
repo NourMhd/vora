@@ -1,6 +1,8 @@
 package com.fusionsolar.monitoring.service;
 
 import com.fusionsolar.monitoring.util.SiteProductionPolicy;
+import com.fusionsolar.monitoring.service.ProductionEstimationService.DailyCoverage;
+import com.fusionsolar.monitoring.service.ProductionEstimationService.DailySiteProduction;
 import com.fusionsolar.monitoring.dto.HistoryPointDto;
 import com.fusionsolar.monitoring.dto.PerformanceReportRowDto;
 import com.fusionsolar.monitoring.persistence.document.SiteDocument;
@@ -10,7 +12,6 @@ import com.fusionsolar.monitoring.persistence.enums.HistoryGranularity;
 import com.fusionsolar.monitoring.persistence.repositories.SiteHistoryRepository;
 import com.fusionsolar.monitoring.persistence.repositories.SiteRepository;
 import com.fusionsolar.monitoring.service.sync.SiteEnergyKpiReconciliationService;
-import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
@@ -36,7 +37,6 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 @Service
-@RequiredArgsConstructor
 public class PerformanceReportService {
 
     private static final ZoneId TUNIS_ZONE = ZoneId.of("Africa/Tunis");
@@ -109,6 +109,20 @@ public class PerformanceReportService {
     private final CurrentSiteAccessService currentSiteAccessService;
     private final com.fusionsolar.monitoring.persistence.repositories.SiteDeviceRepository siteDeviceRepository;
 
+    public PerformanceReportService(SiteRepository siteRepository,
+            SiteHistoryRepository siteHistoryRepository,
+            SiteEnergyKpiReconciliationService siteEnergyKpiReconciliationService,
+            ProductionEstimationService productionEstimationService,
+            CurrentSiteAccessService currentSiteAccessService,
+            com.fusionsolar.monitoring.persistence.repositories.SiteDeviceRepository siteDeviceRepository) {
+        this.siteRepository = siteRepository;
+        this.siteHistoryRepository = siteHistoryRepository;
+        this.siteEnergyKpiReconciliationService = siteEnergyKpiReconciliationService;
+        this.productionEstimationService = productionEstimationService;
+        this.currentSiteAccessService = currentSiteAccessService;
+        this.siteDeviceRepository = siteDeviceRepository;
+    }
+
     public List<PerformanceReportRowDto> getReport(
             String period,
             Integer year,
@@ -120,37 +134,16 @@ public class PerformanceReportService {
         LocalDate today = LocalDate.now(TUNIS_ZONE);
         ReportRange range = resolveReportRange(period, year, month, decade, startDate, endDate, today);
 
-        List<SiteDocument> sites = siteEnergyKpiReconciliationService
-                .reconcileAllFromCachedHistories(siteRepository.findAllByOrderBySiteNameAsc())
-                .stream()
-                .filter(currentSiteAccessService::canAccess)
-                .toList();
-
+        List<SiteDocument> sites = siteRepository.findAllByOrderBySiteNameAsc();
         LocalDate yesterday = today.minusDays(1);
         LocalDate effectiveEnd = minDate(range.endDate(), yesterday);
-        LocalDate historyStart = range.startDate().withDayOfMonth(1);
-        LocalDate historyEnd = effectiveEnd == null
-                ? null
-                : minDate(YearMonth.from(effectiveEnd).atEndOfMonth(), yesterday);
-        List<ProductionEstimationService.DailySiteProduction> siteProductions = sites.stream()
-                .map(site -> loadSiteProduction(site, historyStart, historyEnd))
-                .toList();
+        List<DailySiteProduction> productions = loadVisibleProductions(
+                sites, range.startDate(), effectiveEnd);
 
-        Map<String, ProductionEstimationService.DailySiteProduction> productionsBySiteKey = new HashMap<>();
-        for (ProductionEstimationService.DailySiteProduction production : siteProductions) {
-            if (production.document() != null) {
-                productionsBySiteKey.put(siteKey(production.document()), production);
-            }
-        }
-
-        return sites.stream()
-                .map(site -> toRow(
-                        site,
-                        range,
-                        yesterday,
-                        productionsBySiteKey.get(siteKey(site)),
-                        siteProductions
-                ))
+        return productions.stream()
+                .map(production -> toRow(
+                        siteEnergyKpiReconciliationService.reconcileCurrentKpisFromCache(production.document()),
+                        range, yesterday, production, productions))
                 .toList();
     }
 
@@ -169,15 +162,7 @@ public class PerformanceReportService {
         LocalDate yesterday = today.minusDays(1);
         LocalDate historyEnd = minDate(end.atEndOfMonth(), yesterday);
         List<SiteDocument> sites = siteRepository.findAllByOrderBySiteNameAsc();
-        var accountGroupsByCode = sites.stream().collect(Collectors.groupingBy(
-                site -> new HistoryIdentity(site.getBrand(), site.getSiteCode()),
-                Collectors.mapping(this::accountGroupOf, Collectors.toSet())));
-        var productions = sites.stream()
-                .filter(currentSiteAccessService::canAccess)
-                .map(site -> loadSiteProduction(site, start.atDay(1), historyEnd, (target, month) ->
-                        monthlyHistory(target, month, accountGroupsByCode.get(
-                                new HistoryIdentity(target.getBrand(), target.getSiteCode())).size() == 1)))
-                .toList();
+        List<DailySiteProduction> productions = loadVisibleProductions(sites, start.atDay(1), historyEnd);
 
         return productions.stream().map(production -> {
             SiteDocument site = production.document();
@@ -192,6 +177,20 @@ public class PerformanceReportService {
                     site.getSiteCode(), site.getSiteName(), site.getInstalledPowerKw(),
                     production.zone(), production.governorate(), cells);
         }).toList();
+    }
+
+    private List<DailySiteProduction> loadVisibleProductions(
+            List<SiteDocument> sites, LocalDate start, LocalDate end
+    ) {
+        var accountGroupsByCode = sites.stream().collect(Collectors.groupingBy(
+                site -> new HistoryIdentity(site.getBrand(), site.getSiteCode()),
+                Collectors.mapping(this::accountGroupOf, Collectors.toSet())));
+        return sites.stream()
+                .filter(currentSiteAccessService::canAccess)
+                .map(site -> loadSiteProduction(site, start, end, (target, month) ->
+                        monthlyHistory(target, month, accountGroupsByCode.get(
+                                new HistoryIdentity(target.getBrand(), target.getSiteCode())).size() == 1)))
+                .toList();
     }
 
     private Optional<SiteHistoryDocument> monthlyHistory(SiteDocument site, YearMonth month,
@@ -214,12 +213,16 @@ public class PerformanceReportService {
         LocalDate end = parseFlexibleDate(row.getProductionEndDate());
         double historical = 0.0;
         int positiveDays = 0;
+        int missingDays = 0;
         for (LocalDate day = start; day != null && end != null && !day.isAfter(end); day = day.plusDays(1)) {
-            Double value = productionEstimationService.valueForDay(production, day);
+            Double value = productionEstimationService.rawReportValue(production, day);
             if (value != null && Double.isFinite(value) && value > 0
                     && !SiteProductionPolicy.forcesZero(production.document())) {
                 historical += value;
                 positiveDays++;
+            }
+            if (value == null || !Double.isFinite(value) || value <= 0) {
+                missingDays++;
             }
         }
         Integer days = row.getProductionDaysCount();
@@ -230,7 +233,7 @@ public class PerformanceReportService {
                 days == null ? null : round2(historical), row.getExpectedKwh(),
                 row.getDifferenceKwh(), row.getDifferencePercent(), row.getProductionStartDate(),
                 row.getProductionEndDate(), days, days == null ? null : positiveDays,
-                days == null ? null : days - positiveDays, perKwc,
+                days == null ? null : missingDays, perKwc,
                 perKwc != null && days != null && days > 0 ? perKwc / days : null);
     }
 
@@ -303,8 +306,36 @@ public class PerformanceReportService {
             productionEnd = effectiveFilterEnd;
             productionDays = daysInclusive(productionStart, productionEnd);
             filterDays = productionDays;
-            double value = round2(allocatedKwh);
-            actual = new ActualComputation(value, 0.0, value, productionDays, 0);
+            // Preserve positive measurements; allocate only the remaining monthly counter share.
+            double measured = 0.0;
+            double estimated = 0.0;
+            int captured = 0;
+            int missing = 0;
+            for (LocalDate from = productionStart; !from.isAfter(productionEnd); ) {
+                LocalDate to = minDate(YearMonth.from(from).atEndOfMonth(), productionEnd);
+                double monthMeasured = 0.0;
+                int monthMissing = 0;
+                for (LocalDate day = from; !day.isAfter(to); day = day.plusDays(1)) {
+                    Double value = productionEstimationService.rawReportValue(siteProduction, day);
+                    if (value != null && Double.isFinite(value) && value > 0) {
+                        monthMeasured += value;
+                        captured++;
+                    } else {
+                        monthMissing++;
+                    }
+                }
+                double monthAllocation = com.fusionsolar.monitoring.util.LifetimeEnergyAllocation.allocate(
+                        cumulativeKwh, origin, observationDay, from, to,
+                        (a, b) -> productionEstimationService.theoreticalYieldPerKwc(zone, a, b));
+                measured += round2(monthMeasured);
+                if (monthMissing > 0) {
+                    estimated += round2(Math.max(0.0, monthAllocation - monthMeasured));
+                }
+                missing += monthMissing;
+                from = to.plusDays(1);
+            }
+            actual = new ActualComputation(round2(measured), round2(estimated),
+                    round2(measured + estimated), captured, missing);
         } else {
             actual = computeActualKwh(
                     siteProduction,
@@ -414,21 +445,30 @@ public class PerformanceReportService {
             return new ActualComputation(0.0, 0.0, null, 0, 0);
         }
 
-        ProductionEstimationService.DisplayedProductionComputation displayed = productionEstimationService
-                .computeDisplayedProduction(
-                        siteProduction,
-                        allSiteProductions,
-                        productionStart,
-                        safeProductionEnd
-                );
+        double measured = 0.0;
+        double estimated = 0.0;
+        double total = 0.0;
+        int coveredDays = 0;
+        int daysToComplete = 0;
+        boolean available = false;
 
-        return new ActualComputation(
-                round2(displayed.realKwh()),
-                round2(displayed.estimatedKwh()),
-                displayed.displayedKwh(),
-                displayed.monitoredDays(),
-                displayed.estimatedDays()
-        );
+        for (LocalDate from = productionStart; !from.isAfter(safeProductionEnd); ) {
+            LocalDate to = minDate(YearMonth.from(from).atEndOfMonth(), safeProductionEnd);
+            var month = productionEstimationService.computeDisplayedProduction(
+                    siteProduction, allSiteProductions, from, to);
+            coveredDays += month.monitoredDays();
+            daysToComplete += month.estimatedDays();
+            if (month.displayedKwh() != null) {
+                available = true;
+                total += month.displayedKwh();
+                measured += month.realKwh();
+                estimated += month.estimatedKwh();
+            }
+            from = to.plusDays(1);
+        }
+        return new ActualComputation(round2(measured),
+                available ? round2(estimated) : null,
+                available ? round2(total) : null, coveredDays, daysToComplete);
     }
 
     private ActualRangeComputation actualKwhDetailsInRange(
@@ -592,6 +632,7 @@ public class PerformanceReportService {
     ) {
         Map<LocalDate, Double> valuesByDate = new HashMap<>();
         Set<LocalDate> presentDates = new HashSet<>();
+        Map<LocalDate, DailyCoverage> coverageByDate = new HashMap<>();
 
         if (site != null && (site.getSwapDate() != null || parseFlexibleDate(site.getGridConnectionDate()) != null)
                 && startDate != null && endDate != null && !endDate.isBefore(startDate)) {
@@ -605,7 +646,8 @@ public class PerformanceReportService {
                         startDate,
                         endDate,
                         valuesByDate,
-                        presentDates
+                        presentDates,
+                        coverageByDate
                 ));
                 cursor = cursor.plusMonths(1);
             }
@@ -623,7 +665,8 @@ public class PerformanceReportService {
                 site != null ? safeDouble(site.getInstalledPowerKw()) : 0.0,
                 site != null ? site.getSwapDate() : null,
                 valuesByDate,
-                presentDates
+                presentDates,
+                coverageByDate
         );
     }
 
@@ -633,7 +676,8 @@ public class PerformanceReportService {
             LocalDate startDate,
             LocalDate endDate,
             Map<LocalDate, Double> valuesByDate,
-            Set<LocalDate> presentDates
+            Set<LocalDate> presentDates,
+            Map<LocalDate, DailyCoverage> coverageByDate
     ) {
         if (points == null || points.isEmpty()) {
             return;
@@ -650,18 +694,17 @@ public class PerformanceReportService {
             }
 
             presentDates.add(day);
-            Double sanitizedValue = sanitizeHistoryValue(site, point.getValue());
-            if (sanitizedValue != null) {
-                valuesByDate.merge(day, sanitizedValue, Math::max);
-            }
-        }
-    }
+            Double sanitizedValue = realKpiOrNull(point.getValue());
+            if (sanitizedValue == null) continue;
 
-    private String siteKey(SiteDocument site) {
-        if (site == null) {
-            return "";
+            DailyCoverage coverage = DailyCoverage.fromHistoryStatus(point.getStatus());
+            Double previous = valuesByDate.get(day);
+            // A zero or smaller duplicate cannot erase a positive measurement.
+            if (previous != null && previous >= sanitizedValue) continue;
+            valuesByDate.put(day, sanitizedValue);
+            if (coverage == null) coverageByDate.remove(day);
+            else coverageByDate.put(day, coverage);
         }
-        return (site.getBrand() == null ? "" : site.getBrand().name()) + "::" + (site.getSiteCode() == null ? "" : site.getSiteCode());
     }
 
     private ReportRange resolveReportRange(
