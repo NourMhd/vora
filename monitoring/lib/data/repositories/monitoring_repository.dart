@@ -177,6 +177,19 @@ class MonitoringRepository {
         .toList();
   }
 
+  Future<List<Map<String, dynamic>>> getMonthlyComparison(
+    String startMonth,
+    String endMonth,
+  ) async {
+    final data = await _apiClient.get(
+      '/api/comparatif/monthly',
+      queryParameters: {'startMonth': startMonth, 'endMonth': endMonth},
+    );
+    return (data as List)
+        .map((item) => (item as Map).cast<String, dynamic>())
+        .toList();
+  }
+
   Future<DailyComparisonReport> getAriDailyComparison({
     List<String>? siteCodes,
     String? startDate,

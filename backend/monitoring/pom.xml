@@ -102,4 +102,33 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <id>local-private-config</id>
+            <activation>
+                <property>
+                    <name>!env.SPRING_CONFIG_ADDITIONAL_LOCATION</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.springframework.boot</groupId>
+                        <artifactId>spring-boot-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>default-cli</id>
+                                <configuration>
+                                    <systemPropertyVariables>
+                                        <spring.config.additional-location>optional:file:${project.basedir}/../../deploy/application-private.yml</spring.config.additional-location>
+                                    </systemPropertyVariables>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

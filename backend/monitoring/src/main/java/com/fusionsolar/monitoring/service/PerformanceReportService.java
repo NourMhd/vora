@@ -12,6 +12,8 @@ import com.fusionsolar.monitoring.persistence.repositories.SiteRepository;
 import com.fusionsolar.monitoring.service.sync.SiteEnergyKpiReconciliationService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -21,6 +23,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.format.ResolverStyle;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -28,6 +31,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.BiFunction;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -152,12 +158,107 @@ public class PerformanceReportService {
         return getReport(period, year, month, decade, null, null);
     }
 
+    public List<MonthlyProduction> getMonthlyComparison(YearMonth start, YearMonth end) {
+        LocalDate today = LocalDate.now(TUNIS_ZONE);
+        YearMonth currentMonth = YearMonth.from(today);
+        if (start.isAfter(end) || end.isAfter(currentMonth)
+                || start.isBefore(end.minusMonths(59))) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Période de 1 à 60 mois requise.");
+        }
+
+        LocalDate yesterday = today.minusDays(1);
+        LocalDate historyEnd = minDate(end.atEndOfMonth(), yesterday);
+        List<SiteDocument> sites = siteRepository.findAllByOrderBySiteNameAsc();
+        var accountGroupsByCode = sites.stream().collect(Collectors.groupingBy(
+                site -> new HistoryIdentity(site.getBrand(), site.getSiteCode()),
+                Collectors.mapping(this::accountGroupOf, Collectors.toSet())));
+        var productions = sites.stream()
+                .filter(currentSiteAccessService::canAccess)
+                .map(site -> loadSiteProduction(site, start.atDay(1), historyEnd, (target, month) ->
+                        monthlyHistory(target, month, accountGroupsByCode.get(
+                                new HistoryIdentity(target.getBrand(), target.getSiteCode())).size() == 1)))
+                .toList();
+
+        return productions.stream().map(production -> {
+            SiteDocument site = production.document();
+            Double cumulative = completeInverterTotal(site);
+            List<MonthlyCell> cells = new ArrayList<>();
+            for (YearMonth month = start; !month.isAfter(end); month = month.plusMonths(1)) {
+                var range = new ReportRange(month.atDay(1), month.atEndOfMonth());
+                var row = toRow(site, range, yesterday, production, productions, () -> cumulative);
+                cells.add(monthlyCell(month, row, production));
+            }
+            return new MonthlyProduction(site.getId(), site.getBrand() == null ? null : site.getBrand().name(),
+                    site.getSiteCode(), site.getSiteName(), site.getInstalledPowerKw(),
+                    production.zone(), production.governorate(), cells);
+        }).toList();
+    }
+
+    private Optional<SiteHistoryDocument> monthlyHistory(SiteDocument site, YearMonth month,
+            boolean allowUnattributedHistory) {
+        String accountGroup = accountGroupOf(site);
+        var scoped = siteHistoryRepository.findByBrandAndProviderAccountGroupAndSiteCodeAndGranularityAndBucket(
+                site.getBrand(), accountGroup, site.getSiteCode(), HistoryGranularity.MONTH, month.toString());
+        if (scoped.isPresent()) return scoped;
+
+        return siteHistoryRepository.findLegacyHistoryForAccount(
+                site.getBrand(), site.getSiteCode(), HistoryGranularity.MONTH, month.toString(),
+                site.getProviderAccountKey(), allowUnattributedHistory);
+    }
+
+    private record HistoryIdentity(Brand brand, String siteCode) {}
+
+    private MonthlyCell monthlyCell(YearMonth month, PerformanceReportRowDto row,
+            ProductionEstimationService.DailySiteProduction production) {
+        LocalDate start = parseFlexibleDate(row.getProductionStartDate());
+        LocalDate end = parseFlexibleDate(row.getProductionEndDate());
+        double historical = 0.0;
+        int positiveDays = 0;
+        for (LocalDate day = start; day != null && end != null && !day.isAfter(end); day = day.plusDays(1)) {
+            Double value = productionEstimationService.valueForDay(production, day);
+            if (value != null && Double.isFinite(value) && value > 0
+                    && !SiteProductionPolicy.forcesZero(production.document())) {
+                historical += value;
+                positiveDays++;
+            }
+        }
+        Integer days = row.getProductionDaysCount();
+        Double actual = row.getActualKwh();
+        Double power = production.document().getInstalledPowerKw();
+        Double perKwc = actual != null && power != null && Double.isFinite(power) && power > 0 ? actual / power : null;
+        return new MonthlyCell(month.toString(), actual,
+                days == null ? null : round2(historical), row.getExpectedKwh(),
+                row.getDifferenceKwh(), row.getDifferencePercent(), row.getProductionStartDate(),
+                row.getProductionEndDate(), days, days == null ? null : positiveDays,
+                days == null ? null : days - positiveDays, perKwc,
+                perKwc != null && days != null && days > 0 ? perKwc / days : null);
+    }
+
+    public record MonthlyProduction(String id, String brand, String siteCode, String siteName, Double installedPowerKw,
+            String zone, String governorate, List<MonthlyCell> months) {}
+
+    public record MonthlyCell(String month, Double actualKwh, Double historicalKwh, Double expectedKwh,
+            Double differenceKwh, Double differencePercent, String startDate, String endDate,
+            Integer days, Integer positiveDays, Integer missingDays, Double kwhPerKwc, Double kwhPerKwcDay) {}
+
     private PerformanceReportRowDto toRow(
             SiteDocument site,
             ReportRange range,
             LocalDate yesterday,
             ProductionEstimationService.DailySiteProduction siteProduction,
             List<ProductionEstimationService.DailySiteProduction> allSiteProductions
+    ) {
+        return toRow(site, range, yesterday, siteProduction, allSiteProductions,
+                () -> completeInverterTotal(site));
+    }
+
+    private PerformanceReportRowDto toRow(
+            SiteDocument site,
+            ReportRange range,
+            LocalDate yesterday,
+            ProductionEstimationService.DailySiteProduction siteProduction,
+            List<ProductionEstimationService.DailySiteProduction> allSiteProductions,
+            Supplier<Double> inverterTotal
     ) {
         String governorate = productionEstimationService.governorateForSite(site);
         String zone = productionEstimationService.zoneForGovernorate(governorate);
@@ -186,23 +287,17 @@ public class PerformanceReportService {
                 ? null
                 : round2(productionEstimationService.theoreticalYieldPerKwc(zone, productionStart, productionEnd) * installedPowerKw);
 
-        ActualComputation actual = computeActualKwh(
-                siteProduction,
-                allSiteProductions,
-                range.startDate(),
-                productionEnd,
-                yesterday
-        );
         // The cumulative counter uses the earliest available MES/swap date.
         // The legacy forecast above is deliberately never recalculated here.
         LocalDate observationDay = yesterday.plusDays(1);
         boolean validPower = Double.isFinite(installedPowerKw) && installedPowerKw > 0;
-        Double cumulativeKwh = validPower && zone != null ? completeInverterTotal(site) : null;
+        Double cumulativeKwh = validPower && zone != null ? inverterTotal.get() : null;
         Double allocatedKwh = cumulativeKwh == null ? null
                 : com.fusionsolar.monitoring.util.LifetimeEnergyAllocation.allocate(
                         cumulativeKwh, origin, observationDay, range.startDate(), effectiveFilterEnd,
                         (from, to) -> productionEstimationService.theoreticalYieldPerKwc(zone, from, to));
         boolean allocated = allocatedKwh != null;
+        ActualComputation actual;
         if (allocated) {
             productionStart = maxDate(range.startDate(), origin);
             productionEnd = effectiveFilterEnd;
@@ -210,6 +305,14 @@ public class PerformanceReportService {
             filterDays = productionDays;
             double value = round2(allocatedKwh);
             actual = new ActualComputation(value, 0.0, value, productionDays, 0);
+        } else {
+            actual = computeActualKwh(
+                    siteProduction,
+                    allSiteProductions,
+                    range.startDate(),
+                    productionEnd,
+                    yesterday
+            );
         }
         boolean forcedZero = SiteProductionPolicy.forcesZero(site);
         if (forcedZero) actual = new ActualComputation(0.0, 0.0, 0.0, 0, 0);
@@ -478,6 +581,15 @@ public class PerformanceReportService {
             LocalDate startDate,
             LocalDate endDate
     ) {
+        return loadSiteProduction(site, startDate, endDate, this::historyMonth);
+    }
+
+    private ProductionEstimationService.DailySiteProduction loadSiteProduction(
+            SiteDocument site,
+            LocalDate startDate,
+            LocalDate endDate,
+            BiFunction<SiteDocument, YearMonth, Optional<SiteHistoryDocument>> loadMonth
+    ) {
         Map<LocalDate, Double> valuesByDate = new HashMap<>();
         Set<LocalDate> presentDates = new HashSet<>();
 
@@ -487,7 +599,7 @@ public class PerformanceReportService {
             YearMonth endMonth = YearMonth.from(endDate);
 
             while (!cursor.isAfter(endMonth)) {
-                historyMonth(site, cursor).ifPresent(history -> collectDailyValues(
+                loadMonth.apply(site, cursor).ifPresent(history -> collectDailyValues(
                         site,
                         history.getPoints(),
                         startDate,
