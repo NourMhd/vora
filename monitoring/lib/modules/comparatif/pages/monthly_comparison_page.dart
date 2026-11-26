@@ -903,24 +903,116 @@ class _MonthlyComparisonPageState extends State<MonthlyComparisonPage> {
 
   void export(List<_Site> sites, List<String> months) {
     try {
+      // Match the on-screen palette and keep the displayed values numeric.
+      xlsx.ExcelColor color(Color value) => xlsx.ExcelColor.fromHexString(
+        value.toARGB32().toRadixString(16).padLeft(8, '0').toUpperCase(),
+      );
+      xlsx.CellStyle style(
+        Color background, {
+        Color foreground = AppColors.textPrimary,
+        bool bold = false,
+        bool alignRight = false,
+        bool numeric = false,
+      }) => xlsx.CellStyle(
+        fontFamily: 'Calibri',
+        fontSize: 11,
+        bold: bold,
+        fontColorHex: color(foreground),
+        backgroundColorHex: color(background),
+        horizontalAlign: alignRight
+            ? xlsx.HorizontalAlign.Right
+            : xlsx.HorizontalAlign.Left,
+        verticalAlign: xlsx.VerticalAlign.Center,
+        numberFormat: numeric
+            ? xlsx.NumFormat.defaultFloat
+            : xlsx.NumFormat.standard_0,
+      );
+
       final book = xlsx.Excel.createExcel();
-      final sheet = book['Analyse mensuelle'];
+      const sheetName = 'Analyse mensuelle';
+      final sheet = book[sheetName];
+      book.setDefaultSheet(sheetName);
       book.delete('Sheet1');
-      sheet.appendRow([
-        xlsx.TextCellValue('Site (kWc) · ${metric.label}'),
-        for (final month in months) xlsx.TextCellValue(month),
-        xlsx.TextCellValue('Total période (kWh)'),
-      ]);
-      xlsx.CellValue cell(num? value) => value == null
-          ? xlsx.TextCellValue('Indisponible')
+
+      void put(
+        int row,
+        int column,
+        xlsx.CellValue value,
+        xlsx.CellStyle style,
+      ) {
+        final cell = sheet.cell(
+          xlsx.CellIndex.indexByColumnRow(columnIndex: column, rowIndex: row),
+        );
+        cell.value = value;
+        cell.cellStyle = style;
+      }
+
+      final headers = [
+        'Site / puissance',
+        for (final month in months)
+          metric == _Metric.energy
+              ? monthLabel(month)
+              : '${monthLabel(month)} · ${metric.label}',
+        'Total kWh',
+      ];
+      final totalColumn = headers.length - 1;
+      final siteHeader = style(
+        AppColors.midnightNavy,
+        foreground: AppColors.white,
+        bold: true,
+      );
+      final valueHeader = style(
+        AppColors.midnightNavy,
+        foreground: AppColors.white,
+        bold: true,
+        alignRight: true,
+      );
+      for (final (column, label) in headers.indexed) {
+        final width = column == 0
+            ? 32.0
+            : (label.length + 4).clamp(15, 40).toDouble();
+        sheet.setColumnWidth(column, width);
+        put(
+          0,
+          column,
+          xlsx.TextCellValue(label),
+          column == 0 ? siteHeader : valueHeader,
+        );
+      }
+      sheet.setRowHeight(0, 30);
+
+      final backgrounds = [AppColors.white, AppColors.softWhite];
+      final siteStyles = [
+        for (final background in backgrounds) style(background, bold: true),
+      ];
+      final monthStyles = [
+        for (final background in backgrounds)
+          style(background, alignRight: true, numeric: true),
+      ];
+      final totalStyle = style(
+        AppColors.tealSoft,
+        bold: true,
+        alignRight: true,
+        numeric: true,
+      );
+      xlsx.CellValue numericValue(num? value) => value == null
+          ? xlsx.TextCellValue('—')
           : xlsx.DoubleCellValue(value.toDouble());
-      for (final site in sites) {
-        sheet.appendRow([
-          xlsx.TextCellValue(site.label),
-          for (final month in months)
-            cell(site.months[month]?[metric.field] as num?),
-          cell(site.total(months)),
-        ]);
+
+      for (final (index, site) in sites.indexed) {
+        final row = index + 1;
+        final stripe = index % 2;
+        put(row, 0, xlsx.TextCellValue(site.label), siteStyles[stripe]);
+        for (final (column, month) in months.indexed) {
+          put(
+            row,
+            column + 1,
+            numericValue(site.months[month]?[metric.field] as num?),
+            monthStyles[stripe],
+          );
+        }
+        put(row, totalColumn, numericValue(site.total(months)), totalStyle);
+        sheet.setRowHeight(row, 29);
       }
       book.save(
         fileName: 'comparatif_mensuel_${monthKey(start)}_${monthKey(end)}.xlsx',
