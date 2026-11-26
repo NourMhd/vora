@@ -98,6 +98,106 @@ class MonthlyComparisonTests {
     }
 
     @Test
+    void sumsMonthlyFallbacksAndPreservesAllPositiveDays() throws Exception {
+        var jan = LocalDate.of(2025, 1, 30);
+        var feb = jan.plusDays(2);
+        var end = feb.plusDays(2);
+        var site = site("TUN_0040", jan);
+        var values = Map.of(jan, 4.0, feb, 20.0, feb.plusDays(1), 0.0, end, 1.0);
+        var coverage = Map.of(
+                jan, ProductionEstimationService.DailyCoverage.PARTIAL,
+                feb, ProductionEstimationService.DailyCoverage.PARTIAL,
+                feb.plusDays(1), ProductionEstimationService.DailyCoverage.COMPLETE);
+        var history = new ProductionEstimationService.DailySiteProduction(site, site.getSiteCode(),
+                site.getSiteName(), "TUN", "Zone A", 5.0, jan, values, values.keySet(), coverage);
+        var peerSite = site("TUN_0041", jan);
+        var peerValues = Map.of(jan, 30.0, feb, 100.0);
+        var peer = new ProductionEstimationService.DailySiteProduction(peerSite, peerSite.getSiteCode(),
+                peerSite.getSiteName(), "TUN", "Zone A", 5.0, jan, peerValues, peerValues.keySet());
+        var service = new PerformanceReportService(null, null, null, new ProductionEstimationService(), null, null);
+        var range = Class.forName(PerformanceReportService.class.getName() + "$ReportRange");
+        var constructor = range.getDeclaredConstructor(LocalDate.class, LocalDate.class);
+        constructor.setAccessible(true);
+        var method = PerformanceReportService.class.getDeclaredMethod("toRow", SiteDocument.class,
+                range, LocalDate.class, ProductionEstimationService.DailySiteProduction.class, List.class);
+        method.setAccessible(true);
+        var sites = List.of(history, peer);
+
+        var first = (com.fusionsolar.monitoring.dto.PerformanceReportRowDto)
+                method.invoke(service, site, constructor.newInstance(jan, feb.minusDays(1)), end, history, sites);
+        var second = (com.fusionsolar.monitoring.dto.PerformanceReportRowDto)
+                method.invoke(service, site, constructor.newInstance(feb, end), end, history, sites);
+        var combined = (com.fusionsolar.monitoring.dto.PerformanceReportRowDto)
+                method.invoke(service, site, constructor.newInstance(jan, end), end, history, sites);
+
+        // Jan 30 stays 4 kWh; Jan 31 gets the January peer's 30 kWh.
+        equal(first.getActualKwh(), 34.0);
+        equal(first.getEstimatedMissingKwh(), 30.0);
+        // Positive values stay unchanged; the confirmed zero uses the February peer.
+        equal(second.getActualKwh(), 121.0);
+        equal(second.getEstimatedMissingKwh(), 100.0);
+        equal(combined.getActualKwh(), 155.0);
+        equal(combined.getCapturedKwh(), 25.0);
+        equal(combined.getEstimatedMissingKwh(), 130.0);
+        equal(combined.getEstimatedDaysCount(), 2);
+    }
+
+    @Test
+    void monthlyReportPreservesPositivePartialHistory() {
+        var day = LocalDate.of(2025, 1, 31);
+        var target = site("TUN_0042", day);
+        var sites = repository(SiteRepository.class, (p, m, a) -> List.of(target));
+        var history = repository(SiteHistoryRepository.class, (p, m, a) -> {
+            var document = new SiteHistoryDocument();
+            HistoryPointDto partial = point(day, 4.0);
+            partial.setStatus("PARTIAL");
+            document.setPoints(List.of(partial));
+            return Optional.of(document);
+        });
+        var service = new PerformanceReportService(sites, history, null,
+                new ProductionEstimationService(), new CurrentSiteAccessService(), null);
+
+        var month = YearMonth.from(day);
+        var cell = service.getMonthlyComparison(month, month).get(0).months().get(0);
+        equal(cell.actualKwh(), 4.0);
+        equal(cell.historicalKwh(), 4.0);
+        equal(cell.positiveDays(), 1);
+        equal(cell.missingDays(), 0);
+    }
+
+    @Test
+    void cumulativeNeverReplacesPositiveDays() throws Exception {
+        var day = LocalDate.of(2025, 1, 30);
+        var site = site("TUN_0043", day);
+        var service = new PerformanceReportService(null, null, null, new ProductionEstimationService(), null, null);
+        var range = Class.forName(PerformanceReportService.class.getName() + "$ReportRange");
+        var constructor = range.getDeclaredConstructor(LocalDate.class, LocalDate.class);
+        constructor.setAccessible(true);
+        var method = PerformanceReportService.class.getDeclaredMethod("toRow", SiteDocument.class,
+                range, LocalDate.class, ProductionEstimationService.DailySiteProduction.class, List.class,
+                java.util.function.Supplier.class);
+        method.setAccessible(true);
+        var values = Map.of(day, 20.0, day.plusDays(1), 0.001);
+        var production = new ProductionEstimationService.DailySiteProduction(site, site.getSiteCode(),
+                site.getSiteName(), "TUN", "Zone A", 5.0, day, values, values.keySet());
+        var row = (com.fusionsolar.monitoring.dto.PerformanceReportRowDto) method.invoke(service, site,
+                constructor.newInstance(day, day.plusDays(1)), day.plusDays(1), production, List.of(production),
+                (java.util.function.Supplier<Double>) () -> 1000.0);
+        equal(row.getActualKwh(), 20.0);
+        equal(row.getCapturedDaysCount(), 2);
+        equal(row.getEstimatedDaysCount(), 0);
+        var missing = Map.of(day, 20.0, day.plusDays(1), 0.0);
+        production = new ProductionEstimationService.DailySiteProduction(site, site.getSiteCode(),
+                site.getSiteName(), "TUN", "Zone A", 5.0, day, missing, missing.keySet());
+        row = (com.fusionsolar.monitoring.dto.PerformanceReportRowDto) method.invoke(service, site,
+                constructor.newInstance(day, day.plusDays(1)), day.plusDays(1), production, List.of(production),
+                (java.util.function.Supplier<Double>) () -> 1.0);
+        equal(row.getActualKwh(), 20.0);
+        equal(row.getCapturedDaysCount(), 1);
+        equal(row.getEstimatedDaysCount(), 1);
+    }
+
+    @Test
     void legacyHistoryCannotCrossAccountGroups() {
         var foreignGroup = new SiteHistoryDocument();
         foreignGroup.setProviderAccountGroup("other-group");
