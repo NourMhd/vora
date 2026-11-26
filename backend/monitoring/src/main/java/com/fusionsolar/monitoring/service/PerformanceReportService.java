@@ -334,8 +334,15 @@ public class PerformanceReportService {
                 missing += monthMissing;
                 from = to.plusDays(1);
             }
-            actual = new ActualComputation(round2(measured), round2(estimated),
-                    round2(measured + estimated), captured, missing);
+            // With no positive daily history, retain the validated lifetime-counter
+            // reporting convention: the counter is collected energy, not a fallback estimate.
+            if (captured == 0) {
+                double value = round2(allocatedKwh);
+                actual = new ActualComputation(value, 0.0, value, productionDays, 0);
+            } else {
+                actual = new ActualComputation(round2(measured), round2(estimated),
+                        round2(measured + estimated), captured, missing);
+            }
         } else {
             actual = computeActualKwh(
                     siteProduction,
