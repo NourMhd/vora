@@ -3,12 +3,15 @@ package com.fusionsolar.monitoring.controller;
 import com.fusionsolar.monitoring.dto.DailyComparisonReportDto;
 import com.fusionsolar.monitoring.dto.DailyComparisonSelectableSiteDto;
 import com.fusionsolar.monitoring.service.DailyComparisonService;
+import com.fusionsolar.monitoring.service.PerformanceReportService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.YearMonth;
 import java.util.List;
 
 @RestController
@@ -17,6 +20,15 @@ import java.util.List;
 public class DailyComparisonController {
 
     private final DailyComparisonService dailyComparisonService;
+    private final PerformanceReportService performanceReportService;
+
+    @GetMapping("/monthly")
+    public List<PerformanceReportService.MonthlyProduction> getMonthlyComparison(
+            @RequestParam @DateTimeFormat(pattern = "uuuu-MM") YearMonth startMonth,
+            @RequestParam @DateTimeFormat(pattern = "uuuu-MM") YearMonth endMonth
+    ) {
+        return performanceReportService.getMonthlyComparison(startMonth, endMonth);
+    }
 
     /**
      * Nouvelle route propre : tous les sites disponibles.

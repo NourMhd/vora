@@ -107,6 +107,24 @@ public interface SiteHistoryRepository extends MongoRepository<SiteHistoryDocume
             HistoryGranularity granularity
     );
 
+    default Optional<SiteHistoryDocument> findLegacyHistoryForAccount(
+            Brand brand, String siteCode, HistoryGranularity granularity, String bucket,
+            String accountKey, boolean allowUnattributedHistory
+    ) {
+        var candidates = findAllByBrandAndSiteCodeAndGranularityAndBucket(brand, siteCode, granularity, bucket);
+        if (candidates == null) return Optional.empty();
+        return pickBest(candidates.stream()
+                .filter(Objects::nonNull)
+                .filter(history -> absent(history.getProviderAccountGroup()))
+                .filter(history -> absent(history.getProviderAccountKey()) ? allowUnattributedHistory
+                        : Objects.equals(history.getProviderAccountKey(), accountKey))
+                .toList());
+    }
+
+    private static boolean absent(String value) {
+        return value == null || value.isBlank();
+    }
+
     private static Optional<SiteHistoryDocument> pickBest(List<SiteHistoryDocument> documents) {
         if (documents == null || documents.isEmpty()) {
             return Optional.empty();

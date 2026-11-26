@@ -7,13 +7,32 @@ import '../../../core/utils/formatters.dart';
 import '../../../core/widgets/loading_state.dart';
 import '../../../core/widgets/premium_card.dart';
 import '../../../data/models/daily_comparison_report.dart';
+import '../../../data/repositories/monitoring_repository.dart';
 import '../controllers/comparatif_controller.dart';
 import '../widgets/comparison_charts.dart';
 import '../widgets/site_selection_dialog.dart';
+import 'monthly_comparison_page.dart';
 import '../widgets/sticky_comparison_table.dart';
 
-class ComparatifPage extends GetView<ComparatifController> {
+class ComparatifPage extends StatelessWidget {
   const ComparatifPage({super.key});
+
+  @override
+  Widget build(BuildContext context) => MonthlyComparisonPage(
+    load: Get.find<MonitoringRepository>().getMonthlyComparison,
+    onOpenProduction: () => Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => Scaffold(
+          appBar: AppBar(title: const Text('Comparer la production')),
+          body: const _ProductionComparisonPage(),
+        ),
+      ),
+    ),
+  );
+}
+
+class _ProductionComparisonPage extends GetView<ComparatifController> {
+  const _ProductionComparisonPage();
 
   @override
   Widget build(BuildContext context) {
@@ -29,9 +48,9 @@ class ComparatifPage extends GetView<ComparatifController> {
 
       final report = controller.report.value;
 
-      return Scaffold(
-        backgroundColor: AppColors.softWhite,
-        body: SafeArea(
+      return ColoredBox(
+        color: AppColors.softWhite,
+        child: SafeArea(
           child: RefreshIndicator(
             onRefresh: controller.refreshData,
             child: CustomScrollView(

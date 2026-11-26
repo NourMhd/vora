@@ -27,6 +27,9 @@ class ComparatifController extends GetxController {
   final selectedStartDate = Rxn<DateTime>();
   final selectedEndDate = Rxn<DateTime>();
 
+  Future<List<Map<String, dynamic>>> loadMonthly(String start, String end) =>
+      _repository.getMonthlyComparison(start, end);
+
   @override
   void onInit() {
     super.onInit();
