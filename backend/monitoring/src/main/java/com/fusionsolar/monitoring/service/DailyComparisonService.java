@@ -6,35 +6,26 @@ import com.fusionsolar.monitoring.dto.DailyComparisonReportDto;
 import com.fusionsolar.monitoring.dto.DailyComparisonRowDto;
 import com.fusionsolar.monitoring.dto.DailyComparisonSelectableSiteDto;
 import com.fusionsolar.monitoring.dto.DailyComparisonSiteDto;
-import com.fusionsolar.monitoring.dto.HistoryPointDto;
 import com.fusionsolar.monitoring.persistence.document.SiteDocument;
-import com.fusionsolar.monitoring.persistence.document.SiteHistoryDocument;
-import com.fusionsolar.monitoring.persistence.enums.HistoryGranularity;
 import com.fusionsolar.monitoring.persistence.repositories.SiteHistoryRepository;
 import com.fusionsolar.monitoring.persistence.repositories.SiteRepository;
 import com.fusionsolar.monitoring.util.SiteNameNormalizer;
-import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
-import java.time.Instant;
 import java.time.LocalDate;
-import java.time.YearMonth;
 import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 
 @Service
-@RequiredArgsConstructor
 public class DailyComparisonService {
 
     private static final ZoneId TUNIS_ZONE = ZoneId.of("Africa/Tunis");
@@ -44,13 +35,20 @@ public class DailyComparisonService {
             "ARI_0061",
             "ARI_0088"
     );
-    private static final double EPSILON = ProductionEstimationService.EPSILON;
     private static final String SWAPPED_NOT_MONITORED = "swapé non monitorisé";
 
     private final SiteRepository siteRepository;
     private final SiteHistoryRepository siteHistoryRepository;
     private final ProductionEstimationService productionEstimationService;
     private final CurrentSiteAccessService currentSiteAccessService;
+
+    public DailyComparisonService(SiteRepository siteRepository, SiteHistoryRepository siteHistoryRepository,
+            ProductionEstimationService productionEstimationService, CurrentSiteAccessService currentSiteAccessService) {
+        this.siteRepository = siteRepository;
+        this.siteHistoryRepository = siteHistoryRepository;
+        this.productionEstimationService = productionEstimationService;
+        this.currentSiteAccessService = currentSiteAccessService;
+    }
 
     public DailyComparisonReportDto getAriComparison(String siteCodes, String startDate, String endDate) {
         LocalDate yesterday = LocalDate.now(TUNIS_ZONE).minusDays(1);
@@ -64,7 +62,7 @@ public class DailyComparisonService {
                 .toList();
 
         LocalDate defaultStartDate = sites.stream()
-                .map(ComparisonSite::swapDate)
+                .map(site -> ProductionEstimationService.productionOrigin(site.document()))
                 .filter(Objects::nonNull)
                 .min(LocalDate::compareTo)
                 .orElse(safeEnd);
@@ -72,26 +70,31 @@ public class DailyComparisonService {
         LocalDate effectiveStartDate = requestedStart != null ? requestedStart : defaultStartDate;
 
         if (safeEnd.isBefore(effectiveStartDate)) {
+            Map<String, Double> zeroTotals = new HashMap<>();
+            for (var site : sites) {
+                if (ProductionEstimationService.productionOrigin(site.document()) != null) {
+                    zeroTotals.put(site.siteCode(), 0.0);
+                }
+            }
             return new DailyComparisonReportDto(
                     sites.stream().map(this::toSiteDto).toList(),
                     formatDate(effectiveStartDate),
                     formatDate(safeEnd),
                     List.of(),
                     List.of(),
-                    totalRow("TOTAL", sites, Map.of()),
-                    totalRow("TOTAL", sites, Map.of())
+                    totalRow("TOTAL", sites, zeroTotals),
+                    totalRow("TOTAL", sites, zeroTotals)
             );
         }
 
-        LocalDate historyStart = effectiveStartDate.withDayOfMonth(1);
-        LocalDate calculatedHistoryEnd = YearMonth.from(safeEnd).atEndOfMonth();
-        LocalDate historyEnd = calculatedHistoryEnd.isAfter(yesterday)
-                ? yesterday
-                : calculatedHistoryEnd;
-
+        List<SiteDocument> inventory = siteRepository.findAllByOrderBySiteNameAsc();
         List<ProductionEstimationService.DailySiteProduction> siteValues = sites.stream()
-                .map(site -> loadSiteValues(site, historyStart, historyEnd))
+                .map(site -> ProductionHistoryLoader.load(site.document(), site.siteCode(), site.siteName(),
+                        siteHistoryRepository, productionEstimationService,
+                        site.document() != null && ProductionHistoryLoader.unambiguous(site.document(), inventory), yesterday))
                 .toList();
+        Map<ProductionEstimationService.DailySiteProduction, ProductionEstimationService.SiteReference> references = new java.util.IdentityHashMap<>();
+        for (var site : siteValues) references.put(site, productionEstimationService.continuousReference(site, yesterday));
 
         Map<String, Double> historicalTotals = new HashMap<>();
         Map<String, Double> estimatedTotals = new HashMap<>();
@@ -107,12 +110,8 @@ public class DailyComparisonService {
                 DailyComparisonCellDto historicalCell = historicalCell(siteValue, cursor);
                 DailyComparisonCellDto estimatedCell = estimatedCell(
                         siteValue,
-                        siteValues,
-                        cursor
+                        cursor, yesterday, references.get(siteValue)
                 );
-
-                addToTotal(historicalTotals, siteValue.siteCode(), historicalCell.getValue());
-                addToTotal(estimatedTotals, siteValue.siteCode(), estimatedCell.getValue());
 
                 historicalCells.add(historicalCell);
                 estimatedCells.add(estimatedCell);
@@ -123,6 +122,13 @@ public class DailyComparisonService {
             cursor = cursor.plusDays(1);
         }
 
+        for (var site : siteValues) {
+            var total = productionEstimationService.continuousProduction(site, effectiveStartDate, safeEnd, yesterday, references.get(site));
+            if (total.realKwh() != null && total.displayedKwh() != null) {
+                historicalTotals.put(site.siteCode(), total.realKwh());
+                estimatedTotals.put(site.siteCode(), total.displayedKwh());
+            }
+        }
         return new DailyComparisonReportDto(
                 sites.stream().map(this::toSiteDto).toList(),
                 formatDate(effectiveStartDate),
@@ -179,137 +185,33 @@ public class DailyComparisonService {
         );
     }
 
-    private ProductionEstimationService.DailySiteProduction loadSiteValues(
-            ComparisonSite site,
-            LocalDate startDate,
-            LocalDate endDate
-    ) {
-        Map<LocalDate, Double> valuesByDate = new HashMap<>();
-        Set<LocalDate> presentDates = new HashSet<>();
-
-        if (site.document() != null) {
-            YearMonth cursor = YearMonth.from(startDate);
-            YearMonth endMonth = YearMonth.from(endDate);
-
-            while (!cursor.isAfter(endMonth)) {
-                Optional<SiteHistoryDocument> monthHistory = findHistory(
-                        site.document(),
-                        HistoryGranularity.MONTH,
-                        cursor.toString()
-                );
-
-                monthHistory.ifPresent(history -> collectDailyValues(history.getPoints(), startDate, endDate, valuesByDate, presentDates));
-                cursor = cursor.plusMonths(1);
-            }
-        }
-
-        String governorate = productionEstimationService.governorateForSite(site.document());
-        String zone = productionEstimationService.zoneForGovernorate(governorate);
-
-        return new ProductionEstimationService.DailySiteProduction(
-                site.document(),
-                site.siteCode(),
-                site.siteName(),
-                governorate,
-                zone,
-                site.document() != null && site.document().getInstalledPowerKw() != null ? site.document().getInstalledPowerKw() : 0.0,
-                site.swapDate(),
-                valuesByDate,
-                presentDates
-        );
-    }
-
-    private Optional<SiteHistoryDocument> findHistory(
-            SiteDocument site,
-            HistoryGranularity granularity,
-            String bucket
-    ) {
-        Optional<SiteHistoryDocument> grouped = siteHistoryRepository
-                .findByBrandAndProviderAccountGroupAndSiteCodeAndGranularityAndBucket(
-                        site.getBrand(),
-                        accountGroupOf(site),
-                        site.getSiteCode(),
-                        granularity,
-                        bucket
-                );
-
-        if (grouped.isPresent()) {
-            return grouped;
-        }
-
-        return siteHistoryRepository.findByBrandAndSiteCodeAndGranularityAndBucket(
-                site.getBrand(),
-                site.getSiteCode(),
-                granularity,
-                bucket
-        );
-    }
-
-    private String accountGroupOf(SiteDocument site) {
-        if (site != null && site.getProviderAccountGroup() != null && !site.getProviderAccountGroup().isBlank()) {
-            return site.getProviderAccountGroup().trim();
-        }
-        if (site != null && site.getProviderAccountKey() != null && !site.getProviderAccountKey().isBlank()) {
-            return site.getProviderAccountKey().trim();
-        }
-        return "primary";
-    }
-
-    private void collectDailyValues(
-            List<HistoryPointDto> points,
-            LocalDate startDate,
-            LocalDate endDate,
-            Map<LocalDate, Double> valuesByDate,
-            Set<LocalDate> presentDates
-    ) {
-        if (points == null || points.isEmpty()) {
-            return;
-        }
-
-        for (HistoryPointDto point : points) {
-            if (point == null || point.getCollectTime() == null) {
-                continue;
-            }
-
-            LocalDate day = toLocalDate(point.getCollectTime());
-            if (day == null || day.isBefore(startDate) || day.isAfter(endDate)) {
-                continue;
-            }
-
-            presentDates.add(day);
-            Double normalizedValue = productionEstimationService.normalizeHistoryValue(point.getValue());
-            if (normalizedValue != null) {
-                valuesByDate.merge(day, normalizedValue, Math::max);
-            }
-        }
-    }
-
     private DailyComparisonCellDto historicalCell(ProductionEstimationService.DailySiteProduction siteValue, LocalDate day) {
-        if (SiteProductionPolicy.forcesZero(siteValue.document())) {
-            return new DailyComparisonCellDto(siteValue.siteCode(), 0.0, formatKwh(0.0), false, "FORCED_ZERO");
-        }
         if (siteValue.document() == null) {
             return new DailyComparisonCellDto(siteValue.siteCode(), null, "site introuvable", false, "SITE_NOT_FOUND");
         }
 
-        if (!productionEstimationService.isProductionDay(siteValue, day)) {
+        if (ProductionEstimationService.productionOrigin(siteValue.document()) == null
+                || day.isBefore(ProductionEstimationService.productionOrigin(siteValue.document()))) {
             return new DailyComparisonCellDto(siteValue.siteCode(), null, "pas encore swapé", false, "NOT_SWAPPED_YET");
+        }
+        if (SiteProductionPolicy.forcesZero(siteValue.document())) {
+            return new DailyComparisonCellDto(siteValue.siteCode(), 0.0, formatKwh(0.0), false, "FORCED_ZERO");
         }
 
         if (!productionEstimationService.isPresent(siteValue, day)) {
             return new DailyComparisonCellDto(siteValue.siteCode(), null, SWAPPED_NOT_MONITORED, false, "ABSENT");
         }
 
-        Double value = productionEstimationService.valueForDay(siteValue, day);
+        Double value = productionEstimationService.rawReportValue(siteValue, day);
         if (value == null) {
             return new DailyComparisonCellDto(siteValue.siteCode(), null, SWAPPED_NOT_MONITORED, false, "NULL");
         }
 
-        if (value <= EPSILON) {
+        if (value <= 0) {
             return new DailyComparisonCellDto(siteValue.siteCode(), null, SWAPPED_NOT_MONITORED, false, "ZERO");
         }
 
-        return new DailyComparisonCellDto(siteValue.siteCode(), productionEstimationService.round2(value), formatKwh(value), false, "ORIGINAL");
+        return new DailyComparisonCellDto(siteValue.siteCode(), value, formatKwh(value), false, "ORIGINAL");
     }
 
     private DailyComparisonCellDto estimatedCell(
@@ -317,24 +219,31 @@ public class DailyComparisonService {
             List<ProductionEstimationService.DailySiteProduction> allSites,
             LocalDate day
     ) {
-        if (SiteProductionPolicy.forcesZero(siteValue.document())) {
-            return new DailyComparisonCellDto(siteValue.siteCode(), 0.0, formatKwh(0.0), false, "FORCED_ZERO");
-        }
+        LocalDate yesterday = LocalDate.now(TUNIS_ZONE).minusDays(1);
+        return estimatedCell(siteValue, day, yesterday, productionEstimationService.continuousReference(siteValue, yesterday));
+    }
+
+    private DailyComparisonCellDto estimatedCell(ProductionEstimationService.DailySiteProduction siteValue,
+            LocalDate day, LocalDate yesterday, ProductionEstimationService.SiteReference reference) {
         if (siteValue.document() == null) {
             return new DailyComparisonCellDto(siteValue.siteCode(), null, "site introuvable", false, "SITE_NOT_FOUND");
         }
 
-        if (!productionEstimationService.isProductionDay(siteValue, day)) {
+        if (ProductionEstimationService.productionOrigin(siteValue.document()) == null
+                || day.isBefore(ProductionEstimationService.productionOrigin(siteValue.document()))) {
             return new DailyComparisonCellDto(siteValue.siteCode(), null, "pas encore swapé", false, "NOT_SWAPPED_YET");
+        }
+        if (SiteProductionPolicy.forcesZero(siteValue.document())) {
+            return new DailyComparisonCellDto(siteValue.siteCode(), 0.0, formatKwh(0.0), false, "FORCED_ZERO");
         }
 
         ProductionEstimationService.DailyProductionDecision decision = productionEstimationService
-                .decideDailyProduction(siteValue, allSites, day);
+                .continuousDailyDecision(siteValue, day, yesterday, reference);
 
         if (decision.monitored() && decision.effectiveValue() != null) {
             return new DailyComparisonCellDto(
                     siteValue.siteCode(),
-                    productionEstimationService.round2(decision.effectiveValue()),
+                    decision.effectiveValue(),
                     formatKwh(decision.effectiveValue()),
                     false,
                     decision.status()
@@ -344,7 +253,7 @@ public class DailyComparisonService {
         if (decision.estimated() && decision.effectiveValue() != null) {
             return new DailyComparisonCellDto(
                     siteValue.siteCode(),
-                    productionEstimationService.round2(decision.effectiveValue()),
+                    decision.effectiveValue(),
                     formatKwh(decision.effectiveValue()) + " (estimable)",
                     true,
                     decision.status()
@@ -460,13 +369,6 @@ public class DailyComparisonService {
         return normalized;
     }
 
-    private void addToTotal(Map<String, Double> totals, String siteCode, Double value) {
-        if (siteCode == null || value == null) {
-            return;
-        }
-        totals.merge(siteCode, value, Double::sum);
-    }
-
     private void addUniqueSite(List<SiteDocument> sites, SiteDocument site) {
         if (site == null) {
             return;
@@ -549,14 +451,6 @@ public class DailyComparisonService {
         }
     }
 
-    private LocalDate toLocalDate(Long collectTime) {
-        if (collectTime == null) {
-            return null;
-        }
-
-        long epochMillis = collectTime < 1_000_000_000_000L ? collectTime * 1000 : collectTime;
-        return Instant.ofEpochMilli(epochMillis).atZone(TUNIS_ZONE).toLocalDate();
-    }
 
     private String formatDate(LocalDate date) {
         return date != null ? date.toString() : null;

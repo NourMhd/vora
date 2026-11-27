@@ -11,16 +11,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 
 @Service
 public class ProductionEstimationService {
 
     public static final double EPSILON = 0.000001;
-    static final int FULL_SITE_CONFIDENCE_DAYS = 30;
-    static final int MIN_RELIABLE_PEER_DAYS = 20;
-    static final double MAX_PEER_TO_THEORETICAL_RATIO = 1.20;
     private static final List<String> GOVERNORATE_CODES = List.of(
             "ARI", "BAR", "MAN", "JEN", "ZAG", "BIZ", "TUN", "NAB", "BEJ", "KEF", "SIL",
             "KAI", "SOU", "MAH", "KAS", "MON", "SBO", "SFA",
@@ -42,400 +38,225 @@ public class ProductionEstimationService {
      * Source: fichier "Tableau Rendement Théorique Par Période.xlsx".
      */
     private static final Map<String, double[][]> THEORETICAL_DAILY_YIELD = Map.of(
-            "Zone A", new double[][]{
-                    {2.2, 2.4, 2.5},
-                    {2.8, 3.3, 3.5},
-                    {3.8, 4.2, 4.5},
-                    {4.8, 5.2, 5.6},
-                    {5.9, 6.1, 6.2},
-                    {6.3, 6.4, 6.5},
-                    {6.6, 6.7, 6.5},
-                    {6.3, 6.0, 5.8},
-                    {5.5, 5.0, 4.8},
-                    {4.4, 4.0, 3.8},
-                    {3.0, 2.8, 2.5},
-                    {2.4, 2.3, 2.0}
-            },
-            "Zone B", new double[][]{
-                    {2.266, 2.472, 2.575},
-                    {2.884, 3.399, 3.605},
-                    {3.914, 4.326, 4.635},
-                    {4.944, 5.356, 5.768},
-                    {6.077, 6.283, 6.386},
-                    {6.489, 6.592, 6.695},
-                    {6.798, 6.901, 6.695},
-                    {6.489, 6.180, 5.974},
-                    {5.665, 5.150, 4.944},
-                    {4.532, 4.120, 3.914},
-                    {3.090, 2.884, 2.575},
-                    {2.480, 2.380, 2.060}
-            },
-            "Zone C", new double[][]{
-                    {2.33398, 2.54616, 2.65225},
-                    {2.97052, 3.50097, 3.71315},
-                    {4.03142, 4.45578, 4.77405},
-                    {5.09232, 5.51668, 5.94104},
-                    {6.25931, 6.47149, 6.57758},
-                    {6.68367, 6.78976, 6.89585},
-                    {7.00194, 7.10803, 6.89585},
-                    {6.68367, 6.36540, 6.15322},
-                    {5.83495, 5.30450, 5.09232},
-                    {4.66796, 4.24360, 4.03142},
-                    {3.18270, 2.97052, 2.62650},
-                    {2.52960, 2.42760, 2.10120}
-            }
-    );
-
-    /**
-     * Variante sans liste de sites comparables, conservée pour les consommateurs
-     * historiques. Avec 30 jours réels dans le mois, la moyenne du site suffit.
-     * En dessous de 30 jours, le théorique journalier est le repli sûr.
-     */
-    public DailyProductionDecision decideDailyProduction(
-            DailySiteProduction target,
-            LocalDate day,
-            Map<YearMonth, Double> monthlyRealAverages
-    ) {
-        if (target != null && SiteProductionPolicy.forcesZero(target.document())) {
-            return new DailyProductionDecision(0.0, 0.0, false, false, "FORCED_ZERO");
+        "Zone A", new double[][]{
+                {3.230, 3.299, 3.443}, // Janvier
+                {3.703, 3.912, 4.080}, // Février
+                {4.233, 4.413, 4.607}, // Mars
+                {4.814, 4.960, 5.065}, // Avril
+                {5.131, 5.216, 5.315}, // Mai
+                {5.415, 5.506, 5.606}, // Juin
+                {5.737, 5.782, 5.747}, // Juillet
+                {5.654, 5.529, 5.313}, // Août
+                {4.949, 4.693, 4.509}, // Septembre
+                {4.393, 4.219, 3.993}, // Octobre
+                {3.723, 3.532, 3.374}, // Novembre
+                {3.226, 3.165, 3.170}  // Décembre
+        },
+        "Zone B", new double[][]{
+                {3.794, 3.398, 3.546}, // Janvier
+                {3.814, 4.030, 4.202}, // Février
+                {4.360, 4.545, 4.745}, // Mars
+                {4.958, 5.109, 5.217}, // Avril
+                {5.285, 5.373, 5.474}, // Mai
+                {5.577, 5.671, 5.775}, // Juin
+                {5.909, 5.956, 5.919}, // Juillet
+                {5.823, 5.695, 5.472}, // Août
+                {5.097, 4.834, 4.644}, // Septembre
+                {4.524, 4.346, 4.113}, // Octobre
+                {3.834, 3.638, 3.475}, // Novembre
+                {3.684, 3.641, 3.265}  // Décembre
+        },
+        "Zone C", new double[][]{
+                {4.049, 3.500, 3.652}, // Janvier
+                {3.928, 4.150, 4.328}, // Février
+                {4.491, 4.682, 4.887}, // Mars
+                {5.107, 5.262, 5.373}, // Avril
+                {5.443, 5.534, 5.639}, // Mai
+                {5.744, 5.841, 5.948}, // Juin
+                {6.086, 6.134, 6.096}, // Juillet
+                {5.998, 5.866, 5.636}, // Août
+                {5.250, 4.979, 4.784}, // Septembre
+                {4.660, 4.476, 4.237}, // Octobre
+                {3.949, 3.747, 4.044}, // Novembre
+                {3.913, 3.867, 3.897}  // Décembre
         }
-        if (target == null || target.document() == null) {
-            return DailyProductionDecision.unavailable("SITE_NOT_FOUND");
-        }
+);
 
-        if (!isProductionDay(target, day)) {
-            return DailyProductionDecision.unavailable("NOT_SWAPPED_YET");
-        }
-
-        Double rawValue = valueForDay(target, day);
-        if (rawValue != null && rawValue > EPSILON) {
-            return DailyProductionDecision.monitored(round2(rawValue));
-        }
-
-        Double theoretical = theoreticalDailyKwh(target, day);
-        if (theoretical == null) {
-            return DailyProductionDecision.unavailable("NO_ESTIMATION_BASIS");
-        }
-
-        Double monthAverage = monthlyRealAverages == null ? null : monthlyRealAverages.get(YearMonth.from(day));
-        int monitoredDays = monitoredStats(target, YearMonth.from(day).atDay(1),
-                YearMonth.from(day).atEndOfMonth()).days();
-        if (monthAverage != null && monthAverage > EPSILON && monitoredDays >= FULL_SITE_CONFIDENCE_DAYS) {
-            return DailyProductionDecision.estimated(
-                    round2(monthAverage),
-                    missingStatus(target, day, "SITE_HISTORY_ESTIMATED")
-            );
-        }
-
-        return DailyProductionDecision.estimated(
-                round2(theoretical),
-                missingStatus(target, day, "THEORETICAL_FALLBACK_ESTIMATED")
-        );
+    /** Shared report origin: the earliest known physical/administrative start. */
+    public static LocalDate productionOrigin(SiteDocument site) {
+        if (site == null) return null;
+        LocalDate mes = parseFlexibleDate(site.getGridConnectionDate());
+        LocalDate swap = site.getSwapDate();
+        return swap == null ? mes : mes == null || swap.isBefore(mes) ? swap : mes;
     }
 
-    /**
-     * Variante utilisée par le tableau journalier.
-     * - 30 jours réels ou plus: moyenne réelle du site;
-     * - 1 à 29 jours: moyenne site/référence régionale pondérée par jours/30;
-     * - 0 jour: référence régionale;
-     * - aucune référence fiable: théorique journalier.
-     */
-    public DailyProductionDecision decideDailyProduction(
-            DailySiteProduction target,
-            List<DailySiteProduction> allSites,
-            LocalDate day
-    ) {
-        if (target != null && SiteProductionPolicy.forcesZero(target.document())) {
-            return new DailyProductionDecision(0.0, 0.0, false, false, "FORCED_ZERO");
-        }
-        if (target == null || target.document() == null) {
-            return DailyProductionDecision.unavailable("SITE_NOT_FOUND");
-        }
-        if (day == null || !isProductionDay(target, day)) {
-            return DailyProductionDecision.unavailable("NOT_SWAPPED_YET");
-        }
-        Double rawValue = valueForDay(target, day);
-        if (rawValue != null && rawValue > EPSILON) {
-            return DailyProductionDecision.monitored(round2(rawValue));
-        }
-
-        DailyEstimate estimate = estimateMissingDay(target, allSites, day);
-        return estimate.value() == null
-                ? DailyProductionDecision.unavailable(missingStatus(target, day, "NO_ESTIMATION_BASIS"))
-                : DailyProductionDecision.estimated(round2(estimate.value()), missingStatus(target, day, estimate.method()));
-    }
-
-    /**
-     * Production report only: replace absent, invalid or zero days with the
-     * best same-governorate site's positive-day average.
-     * Each candidate uses the common filter, bounded by its own swap date.
-     * With no valid reference, use the target's daily theoretical production.
-     * The independent daily-comparison policy below is unchanged.
-     */
-    public DisplayedProductionComputation computeDisplayedProduction(
-            DailySiteProduction target, LocalDate startDate, LocalDate endDate
-    ) {
-        return computeDisplayedProduction(target,
-                target == null ? List.of() : List.of(target), startDate, endDate);
-    }
-
-    public DisplayedProductionComputation computeDisplayedProduction(
-            DailySiteProduction target, List<DailySiteProduction> allSites,
-            LocalDate startDate, LocalDate endDate
-    ) {
-        if (target != null && SiteProductionPolicy.forcesZero(target.document())) {
-            return new DisplayedProductionComputation(0.0, 0.0, 0.0, 0, 0);
-        }
-        if (target == null || target.document() == null || target.swapDate() == null
-                || !validReportPower(target.installedPowerKw())
-                || startDate == null || endDate == null || endDate.isBefore(startDate)
-                || target.swapDate().isAfter(endDate)) {
-            return unavailableDisplayedProduction();
-        }
-
-        Double bestYield = reportReferenceYield(target, allSites, startDate, endDate);
-        double realKwh = 0.0;
-        double estimatedKwh = 0.0;
-        int monitoredDays = 0;
-        int estimatedDays = 0;
-        boolean available = true;
-        LocalDate firstDay = startDate.isAfter(target.swapDate()) ? startDate : target.swapDate();
-        for (LocalDate day = firstDay; !day.isAfter(endDate); day = day.plusDays(1)) {
-            Double value = validReportValue(target, day);
-            if (value != null) {
-                realKwh += value;
-                monitoredDays++;
-            } else {
-                estimatedDays++;
-                Double replacement = null;
-                if (bestYield != null) {
-                    replacement = bestYield * target.installedPowerKw();
-                } else if (!isBlank(target.zone()) && THEORETICAL_DAILY_YIELD.containsKey(target.zone())) {
-                    replacement = theoreticalDailyYieldPerKwc(target.zone(), day) * target.installedPowerKw();
-                }
-                if (replacement == null || !Double.isFinite(replacement)) {
-                    available = false;
-                } else {
-                    estimatedKwh += replacement;
-                }
-            }
-        }
-        return new DisplayedProductionComputation(round2(realKwh),
-                available ? round2(estimatedKwh) : null,
-                available ? round2(realKwh + estimatedKwh) : null,
-                monitoredDays, estimatedDays);
-    }
-
-    private boolean validReportPower(double power) {
-        return Double.isFinite(power) && power > 0;
-    }
-
-    /** Any finite strictly positive daily measurement is valid. */
-    private Double validReportValue(DailySiteProduction site, LocalDate day) {
-        if (!validReportPower(site.installedPowerKw()) || !isProductionDay(site, day)
-                || site.valuesByDate() == null) {
+    static LocalDate parseFlexibleDate(String value) {
+        if (value == null || value.isBlank()) {
             return null;
         }
-        Double value = site.valuesByDate().get(day);
-        return value != null && Double.isFinite(value)
-                && value > 0
-                ? value : null;
-    }
 
-    private Double reportAverageYield(DailySiteProduction site, LocalDate start, LocalDate end) {
-        if (site == null || SiteProductionPolicy.forcesZero(site.document()) || site.document() == null || site.swapDate() == null
-                || !validReportPower(site.installedPowerKw()) || site.swapDate().isAfter(end)) {
-            return null;
-        }
-        double sum = 0;
-        int count = 0;
-        LocalDate firstDay = start.isAfter(site.swapDate()) ? start : site.swapDate();
-        for (LocalDate day = firstDay; !day.isAfter(end); day = day.plusDays(1)) {
-            Double value = validReportValue(site, day);
-            if (value != null && value > 0) {
-                sum += value;
-                count++;
+        String trimmed = value.trim();
+
+        if (trimmed.matches("\\d{10,13}")) {
+            try {
+                long raw = Long.parseLong(trimmed);
+                long epochMillis = raw < 1_000_000_000_000L ? raw * 1000 : raw;
+                return java.time.Instant.ofEpochMilli(epochMillis).atZone(java.time.ZoneId.of("Africa/Tunis")).toLocalDate();
+            } catch (NumberFormatException ignored) {
+                // Try formatted dates below.
             }
         }
-        if (count == 0) return null;
-        double yield = sum / count / site.installedPowerKw();
-        return Double.isFinite(yield) ? yield : null;
+
+        if (trimmed.length() >= 10) {
+            String datePart = trimmed.substring(0, 10);
+            try {
+                return LocalDate.parse(datePart);
+            } catch (java.time.format.DateTimeParseException ignored) {
+                // Try full value below.
+            }
+        }
+
+        try {
+            return LocalDate.parse(trimmed);
+        } catch (java.time.format.DateTimeParseException ignored) {
+            // Try display formats below.
+        }
+
+        try {
+            return LocalDate.parse(trimmed, java.time.format.DateTimeFormatter.ofPattern("dd/MM/uuuu").withResolverStyle(java.time.format.ResolverStyle.STRICT));
+        } catch (java.time.format.DateTimeParseException ignored) {
+            // Try slash ISO-like format below.
+        }
+
+        try {
+            return LocalDate.parse(trimmed, java.time.format.DateTimeFormatter.ofPattern("uuuu/MM/dd"));
+        } catch (java.time.format.DateTimeParseException ignored) {
+            return null;
+        }
     }
 
-    private Double reportReferenceYield(DailySiteProduction target, List<DailySiteProduction> sites,
-                                        LocalDate start, LocalDate end) {
-        // Always include the target so the best site's gaps use its own average.
-        Double best = reportAverageYield(target, start, end);
-        if (isBlank(target.governorate()) || sites == null) return best;
-        for (DailySiteProduction candidate : sites) {
-            if (candidate == null || isBlank(candidate.governorate())
-                    || !target.governorate().equalsIgnoreCase(candidate.governorate())) continue;
-            Double candidateYield = reportAverageYield(candidate, start, end);
-            if (candidateYield != null && (best == null || candidateYield > best)) {
-                best = candidateYield;
+    public record SiteReference(LocalDate start, LocalDate end, int days, double coefficient) {}
+
+    /** Longest uninterrupted positive history, independent of report filter. */
+    public SiteReference continuousReference(DailySiteProduction site, LocalDate yesterday) {
+        LocalDate origin = site == null ? null : productionOrigin(site.document());
+        if (origin == null || yesterday == null || !validReportPower(site.installedPowerKw())
+                || !THEORETICAL_DAILY_YIELD.containsKey(site.zone() == null ? "" : site.zone())) return null;
+        SiteReference best = new SiteReference(null, null, 0, 0.84);
+        if (site.valuesByDate() == null || SiteProductionPolicy.forcesZero(site.document())) return best;
+        LocalDate first = null, last = null;
+        int days = 0;
+        double actual = 0, expected = 0;
+        for (var entry : new java.util.TreeMap<>(site.valuesByDate()).entrySet()) {
+            LocalDate day = entry.getKey();
+            Double value = entry.getValue();
+            if (day.isBefore(origin) || day.isAfter(yesterday)) continue;
+            if (value == null || !Double.isFinite(value) || value <= 0) {
+                first = last = null; days = 0; actual = expected = 0;
+                continue;
+            }
+            if (last == null || !last.plusDays(1).equals(day)) {
+                first = day; days = 0; actual = expected = 0;
+            }
+            last = day; days++;
+            actual += value;
+            expected += theoreticalDailyYieldPerKwc(site.zone(), day) * site.installedPowerKw();
+            double coefficient = expected > 0 ? actual / expected : Double.NaN;
+            // Treat only floating-point noise as a tie, not a real difference in yield.
+            double tolerance = 1e-12 * Math.max(Math.abs(coefficient), Math.abs(best.coefficient()));
+            boolean betterAtSameLength = days == best.days() && (coefficient > best.coefficient() + tolerance
+                    || (Math.abs(coefficient - best.coefficient()) <= tolerance && day.isAfter(best.end())));
+            if (Double.isFinite(coefficient) && (days > best.days() || betterAtSameLength)) {
+                best = new SiteReference(first, day, days, coefficient);
             }
         }
         return best;
     }
 
-    private DailyEstimate estimateMissingDay(
-            DailySiteProduction target,
-            List<DailySiteProduction> allSites,
-            LocalDate day
-    ) {
-        if (target == null || day == null || target.installedPowerKw() <= EPSILON) {
-            return new DailyEstimate(null, "NO_ESTIMATION_BASIS");
-        }
-
-        YearMonth month = YearMonth.from(day);
-        return estimateMissingDay(target, day, estimationBasis(target, allSites, month));
+    /** The daily decision shared by the daily, monthly and annual reports. */
+    public DailyProductionDecision continuousDailyDecision(DailySiteProduction site, LocalDate day,
+            LocalDate yesterday, SiteReference reference) {
+        LocalDate origin = site == null ? null : productionOrigin(site.document());
+        if (site == null || site.document() == null) return DailyProductionDecision.unavailable("SITE_NOT_FOUND");
+        if (origin == null || day == null || yesterday == null || day.isBefore(origin) || day.isAfter(yesterday))
+            return DailyProductionDecision.unavailable("NOT_SWAPPED_YET");
+        if (SiteProductionPolicy.forcesZero(site.document()))
+            return new DailyProductionDecision(0.0, 0.0, false, false, "FORCED_ZERO");
+        if (reference == null) return DailyProductionDecision.unavailable("NO_ESTIMATION_BASIS");
+        Double value = rawReportValue(site, day);
+        if (value != null && value > 0) return DailyProductionDecision.monitored(value);
+        double replacement = theoreticalDailyYieldPerKwc(site.zone(), day) * site.installedPowerKw() * reference.coefficient();
+        if (!Double.isFinite(replacement)) return DailyProductionDecision.unavailable("NO_ESTIMATION_BASIS");
+        return DailyProductionDecision.estimated(replacement, missingStatus(site, day,
+                reference.days() == 0 ? "THEORETICAL_FALLBACK_ESTIMATED" : "SITE_HISTORY_ESTIMATED"));
     }
 
-    private EstimationBasis estimationBasis(
-            DailySiteProduction target,
-            List<DailySiteProduction> allSites,
-            YearMonth month
-    ) {
-        LocalDate monthStart = month.atDay(1);
-        LocalDate monthEnd = month.atEndOfMonth();
-        MonitoredStats targetStats = monitoredStats(target, monthStart, monthEnd);
-        Double peerDailyKwh = targetStats.days() >= FULL_SITE_CONFIDENCE_DAYS
-                ? null
-                : bestPeerDailyKwh(target, allSites, monthStart, monthEnd);
-        return new EstimationBasis(targetStats, peerDailyKwh);
+    /** Monthly rounding boundary shared by all reports, including multi-month totals. */
+    public DisplayedProductionComputation continuousProduction(DailySiteProduction site, LocalDate start,
+            LocalDate end, LocalDate yesterday, SiteReference reference) {
+        LocalDate origin = site == null ? null : productionOrigin(site.document());
+        if (origin == null || start == null || end == null || yesterday == null) return unavailableDisplayedProduction();
+        if (start.isBefore(origin)) start = origin;
+        if (end.isAfter(yesterday)) end = yesterday;
+        if (start.isAfter(end)) return new DisplayedProductionComputation(0.0, 0.0, 0.0, 0, 0);
+        if (SiteProductionPolicy.forcesZero(site.document())) return new DisplayedProductionComputation(0.0, 0.0, 0.0, 0, 0);
+        if (reference == null) return unavailableDisplayedProduction();
+        double real = 0, estimated = 0;
+        int monitored = 0, missing = 0;
+        for (LocalDate from = start; !from.isAfter(end); ) {
+            LocalDate to = YearMonth.from(from).atEndOfMonth();
+            if (to.isAfter(end)) to = end;
+            double monthReal = 0, monthEstimated = 0;
+            for (LocalDate day = from; !day.isAfter(to); day = day.plusDays(1)) {
+                var decision = continuousDailyDecision(site, day, yesterday, reference);
+                if (decision.monitored()) { monthReal += decision.effectiveValue(); monitored++; }
+                else if (decision.estimated()) { monthEstimated += decision.effectiveValue(); missing++; }
+                else return unavailableDisplayedProduction();
+            }
+            real += round2(monthReal); estimated += round2(monthEstimated);
+            from = to.plusDays(1);
+        }
+        return new DisplayedProductionComputation(round2(real), round2(estimated), round2(real + estimated), monitored, missing);
     }
 
-    private DailyEstimate estimateMissingDay(
-            DailySiteProduction target,
-            LocalDate day,
-            EstimationBasis basis
-    ) {
-        MonitoredStats targetStats = basis.targetStats();
-
-        if (targetStats.days() >= FULL_SITE_CONFIDENCE_DAYS) {
-            return new DailyEstimate(targetStats.average(), "SITE_HISTORY_ESTIMATED");
+    public Double continuousExpected(String zone, double power, LocalDate start, LocalDate end) {
+        if (start == null || end == null) return null;
+        if (start.isAfter(end)) return 0.0;
+        if (!validReportPower(power) || zone == null || !THEORETICAL_DAILY_YIELD.containsKey(zone)) return null;
+        double total = 0;
+        for (LocalDate from = start; !from.isAfter(end); ) {
+            LocalDate to = YearMonth.from(from).atEndOfMonth();
+            if (to.isAfter(end)) to = end;
+            total += round2(theoreticalYieldPerKwc(zone, from, to) * power);
+            from = to.plusDays(1);
         }
-
-        Double peerDailyKwh = basis.peerDailyKwh();
-        if (peerDailyKwh != null) {
-            if (targetStats.days() <= 0) {
-                return new DailyEstimate(peerDailyKwh, "REGIONAL_REFERENCE_ESTIMATED");
-            }
-
-            double confidence = Math.min(1.0, targetStats.days() / (double) FULL_SITE_CONFIDENCE_DAYS);
-            double weighted = confidence * targetStats.average() + (1.0 - confidence) * peerDailyKwh;
-            return new DailyEstimate(weighted, "REGIONAL_WEIGHTED_ESTIMATED");
-        }
-
-        return new DailyEstimate(theoreticalDailyKwh(target, day), "THEORETICAL_FALLBACK_ESTIMATED");
+        return round2(total);
     }
 
-    private Double bestPeerDailyKwh(
-            DailySiteProduction target,
-            List<DailySiteProduction> allSites,
-            LocalDate startDate,
-            LocalDate endDate
-    ) {
-        if (target == null || target.installedPowerKw() <= EPSILON || target.governorate() == null
-                || allSites == null || startDate == null || endDate == null || endDate.isBefore(startDate)) {
-            return null;
-        }
-
-        double bestSpecificDailyYield = -1.0;
-        for (DailySiteProduction candidate : allSites) {
-            if (candidate == null || candidate.document() == null || SiteProductionPolicy.forcesZero(candidate.document()) || candidate.installedPowerKw() <= EPSILON
-                    || candidate.swapDate() == null || sameSite(target, candidate)
-                    || !Objects.equals(target.governorate(), candidate.governorate())) {
-                continue;
-            }
-
-            double monitoredKwh = 0.0;
-            int monitoredDays = 0;
-            LocalDate cursor = startDate;
-            while (!cursor.isAfter(endDate)) {
-                if (isProductionDay(candidate, cursor)) {
-                    Double value = valueForDay(candidate, cursor);
-                    if (value != null && value > EPSILON) {
-                        monitoredKwh += value;
-                        monitoredDays++;
-                    }
-                }
-                cursor = cursor.plusDays(1);
-            }
-
-            if (monitoredDays < MIN_RELIABLE_PEER_DAYS) {
-                continue;
-            }
-
-            double specificDailyYield = monitoredKwh / monitoredDays / candidate.installedPowerKw();
-            if (specificDailyYield > bestSpecificDailyYield) {
-                bestSpecificDailyYield = specificDailyYield;
-            }
-        }
-
-        if (bestSpecificDailyYield <= EPSILON) {
-            return null;
-        }
-
-        double peerDailyKwh = bestSpecificDailyYield * target.installedPowerKw();
-        Double theoreticalAverage = theoreticalAverageForProductionDays(target, startDate, endDate);
-        if (theoreticalAverage != null && theoreticalAverage > EPSILON) {
-            peerDailyKwh = Math.min(peerDailyKwh, theoreticalAverage * MAX_PEER_TO_THEORETICAL_RATIO);
-        }
-        return round2(peerDailyKwh);
+    /** Compatibility entry points: all report estimation now uses the site-only reference. */
+    public DailyProductionDecision decideDailyProduction(DailySiteProduction target, LocalDate day,
+            Map<YearMonth, Double> ignoredMonthlyAverages) {
+        return decideDailyProduction(target, List.of(), day);
     }
 
-    private MonitoredStats monitoredStats(DailySiteProduction site, LocalDate startDate, LocalDate endDate) {
-        if (site == null || startDate == null || endDate == null || endDate.isBefore(startDate)) {
-            return new MonitoredStats(0.0, 0);
-        }
-
-        double kwh = 0.0;
-        int days = 0;
-        LocalDate cursor = startDate;
-        while (!cursor.isAfter(endDate)) {
-            if (isProductionDay(site, cursor)) {
-                Double value = valueForDay(site, cursor);
-                if (value != null && value > EPSILON) {
-                    kwh += value;
-                    days++;
-                }
-            }
-            cursor = cursor.plusDays(1);
-        }
-        return new MonitoredStats(kwh, days);
+    public DailyProductionDecision decideDailyProduction(DailySiteProduction target,
+            List<DailySiteProduction> ignoredPeers, LocalDate day) {
+        LocalDate yesterday = LocalDate.now(java.time.ZoneId.of("Africa/Tunis")).minusDays(1);
+        return continuousDailyDecision(target, day, yesterday, continuousReference(target, yesterday));
     }
 
-    private Double theoreticalAverageForProductionDays(
-            DailySiteProduction site,
-            LocalDate startDate,
-            LocalDate endDate
-    ) {
-        double total = 0.0;
-        int days = 0;
-        LocalDate cursor = startDate;
-        while (!cursor.isAfter(endDate)) {
-            if (isProductionDay(site, cursor)) {
-                Double value = theoreticalDailyKwh(site, cursor);
-                if (value != null) {
-                    total += value;
-                    days++;
-                }
-            }
-            cursor = cursor.plusDays(1);
-        }
-        return days == 0 ? null : total / days;
+    public DisplayedProductionComputation computeDisplayedProduction(DailySiteProduction target,
+            LocalDate start, LocalDate end) {
+        return computeDisplayedProduction(target, List.of(), start, end);
     }
 
-    private boolean sameSite(DailySiteProduction left, DailySiteProduction right) {
-        if (left.document() == right.document()) {
-            return true;
-        }
-
-        return Objects.equals(left.document().getBrand(), right.document().getBrand())
-                && Objects.equals(left.siteCode(), right.siteCode())
-                && Objects.equals(left.document().getProviderAccountGroup(), right.document().getProviderAccountGroup());
+    public DisplayedProductionComputation computeDisplayedProduction(DailySiteProduction target,
+            List<DailySiteProduction> ignoredPeers, LocalDate start, LocalDate end) {
+        LocalDate yesterday = LocalDate.now(java.time.ZoneId.of("Africa/Tunis")).minusDays(1);
+        return continuousProduction(target, start, end, yesterday, continuousReference(target, yesterday));
     }
+
+    private boolean validReportPower(double power) { return Double.isFinite(power) && power > 0; }
 
     private DisplayedProductionComputation unavailableDisplayedProduction() {
         return new DisplayedProductionComputation(0.0, 0.0, null, 0, 0);
@@ -595,12 +416,12 @@ public class ProductionEstimationService {
             return "ABSENT_" + suffix;
         }
 
-        Double rawValue = valueForDay(site, day);
+        Double rawValue = rawReportValue(site, day);
         if (rawValue == null) {
             return "NULL_" + suffix;
         }
 
-        if (rawValue <= EPSILON) {
+        if (rawValue <= 0) {
             return "ZERO_" + suffix;
         }
 
@@ -663,18 +484,6 @@ public class ProductionEstimationService {
             int monitoredDays,
             int estimatedDays
     ) {
-    }
-
-    private record MonitoredStats(double kwh, int days) {
-        double average() {
-            return days <= 0 ? 0.0 : kwh / days;
-        }
-    }
-
-    private record DailyEstimate(Double value, String method) {
-    }
-
-    private record EstimationBasis(MonitoredStats targetStats, Double peerDailyKwh) {
     }
 
     public enum DailyCoverage {

@@ -47,7 +47,7 @@ class SiteProductionOverrideTests {
         eq(service.decideDailyProduction(target, day.plusDays(1), Map.of()).effectiveValue(), 0.0);
         target.document().setSwapDate(null);
         var missingSwap = daily(target.document(), 999.0);
-        eq(service.computeDisplayedProduction(missingSwap, day, day).displayedKwh(), 0.0);
+        eq(service.computeDisplayedProduction(missingSwap, day, day).displayedKwh(), null);
     }
     @Test void neverUsesTheOverrideAsAReferenceForAnotherSite() {
         var target = daily(document("SFA_0139"), 20.0);

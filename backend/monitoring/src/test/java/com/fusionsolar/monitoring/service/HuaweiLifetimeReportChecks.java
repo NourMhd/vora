@@ -41,24 +41,21 @@ public class HuaweiLifetimeReportChecks {
                 ProductionEstimationService.DailySiteProduction.class,List.class);method.setAccessible(true);
         LocalDate jan=LocalDate.of(2025,1,1), janEnd=LocalDate.of(2025,1,31), febEnd=LocalDate.of(2025,2,28);
         var row=(PerformanceReportRowDto)method.invoke(service,site,ctor.newInstance(jan,janEnd),febEnd.minusDays(1),null,List.of());
-        eq(row.getCapturedKwh(),735.0);eq(row.getActualKwh(),735.0);eq(row.getEstimatedMissingKwh(),0.0);
-        eq(row.getCapturedDaysCount(),31);eq(row.getEstimatedDaysCount(),0);eq(row.getDataStatus(),"OK");
-        eq(row.getProductionStartDate(),"2025-01-01");eq(row.getExpectedKwh(),735.0);
-        row=(PerformanceReportRowDto)method.invoke(service,site,ctor.newInstance(janEnd.plusDays(1),febEnd),febEnd.minusDays(1),null,List.of());
-        eq(row.getCapturedKwh(),855.0);eq(row.getProductionEndDate(),"2025-02-27");
-        row=(PerformanceReportRowDto)method.invoke(service,site,ctor.newInstance(jan,febEnd),febEnd.minusDays(1),null,List.of());
-        eq(row.getCapturedKwh(),1590.0);eq(row.getActualKwh(),1590.0);
-        // Missing a second counter never yields a partial sum; normal history takes over.
+        eq(row.getCapturedKwh(),0.0);eq(row.getActualKwh(),866.57);eq(row.getEstimatedMissingKwh(),866.57);
+        eq(row.getCapturedDaysCount(),0);eq(row.getEstimatedDaysCount(),31);eq(row.getDataStatus(),"OK");
+        eq(row.getProductionStartDate(),"2025-01-01");eq(row.getExpectedKwh(),1031.63);
         cache.setInverterTotalKwh(Map.of("1",1000.0));
         eq(HuaweiInverterEnergySyncService.completeTotal(cache,now),null);
-        site.setSwapDate(jan);
         var daily=new ProductionEstimationService.DailySiteProduction(site,site.getSiteCode(),site.getSiteName(),"ARI","Zone A",10,jan,
                 Map.of(jan,20.0),Set.of(jan));
         row=(PerformanceReportRowDto)method.invoke(service,site,ctor.newInstance(jan,janEnd),febEnd.minusDays(1),daily,List.of(daily));
-        eq(row.getCapturedKwh(),20.0);eq(row.getEstimatedDaysCount(),30);eq(row.getActualKwh(),620.0);
+        eq(row.getCapturedKwh(),20.0);eq(row.getEstimatedDaysCount(),30);eq(row.getActualKwh(),638.78);
+        var withoutCounter=row.getActualKwh();
         cache.setInverterTotalKwh(Map.of("1",1000.0,"2",625.0));
         cache.setInverterTotalObservedAt(Map.of("1",now,"2",now.minusSeconds(1201)));
         eq(HuaweiInverterEnergySyncService.completeTotal(cache,now),null);
+        row=(PerformanceReportRowDto)method.invoke(service,site,ctor.newInstance(jan,janEnd),febEnd.minusDays(1),daily,List.of(daily));
+        eq(row.getActualKwh(),withoutCounter);
         System.out.println("Huawei lifetime report: "+checks+" checks passed");
     }
 }
