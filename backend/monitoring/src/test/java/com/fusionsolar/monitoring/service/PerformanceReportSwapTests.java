@@ -1,61 +1,21 @@
 package com.fusionsolar.monitoring.service;
-
 import org.junit.jupiter.api.Test;
-import com.fusionsolar.monitoring.service.*;
-import com.fusionsolar.monitoring.service.ProductionEstimationService.*;
-import com.fusionsolar.monitoring.persistence.document.SiteDocument;
-import com.fusionsolar.monitoring.dto.PerformanceReportRowDto;
-import java.time.*; import java.util.*; import java.lang.reflect.*;
+import java.time.*;
+import java.util.*;
+import static com.fusionsolar.monitoring.service.ProductionEstimationServiceTests.*;
 class PerformanceReportSwapTests {
- static int checks;
- static void eq(Object a,Object b) { checks++; if(!Objects.equals(a,b))throw new AssertionError(a+" != "+b); }
- static final PerformanceReportService service=new PerformanceReportService(null,null,null,new ProductionEstimationService(),null,null);
- static SiteDocument site=new SiteDocument();
- static Method toRow,load; static Constructor<?> ctor;
- static PerformanceReportRowDto row(LocalDate start,LocalDate end,LocalDate yesterday,Map<LocalDate,Double> values)throws Exception{
-  var daily=new DailySiteProduction(site,"ARI_1","ARI_1","ARI","Zone A",10,site.getSwapDate(),values,values.keySet());
-  return (PerformanceReportRowDto)toRow.invoke(service,site,ctor.newInstance(start,end),yesterday,daily,List.of(daily));
- }
- @Test
- void appliesSwapBoundariesAndUnavailableValues() throws Exception {
-  Class<?> range=Class.forName("com.fusionsolar.monitoring.service.PerformanceReportService$ReportRange");
-  ctor=range.getDeclaredConstructors()[0];ctor.setAccessible(true);
-  toRow=PerformanceReportService.class.getDeclaredMethod("toRow",SiteDocument.class,range,LocalDate.class,DailySiteProduction.class,List.class);toRow.setAccessible(true);
-  site.setSiteCode("ARI_1");site.setSiteName("ARI_1");site.setInstalledPowerKw(10.0);
-  LocalDate start=LocalDate.of(2025,11,1),end=LocalDate.of(2025,11,30),swap=LocalDate.of(2025,11,10);
-  site.setSwapDate(swap);site.setGridConnectionDate("2026-02-01");
-  var r=row(start,end,end,Map.of(start,999.0,swap,0.0,swap.plusDays(1),20.0));
-  eq(r.getProductionStartDate(),"2025-11-10");eq(r.getProductionDaysCount(),21);eq(r.getFilterDaysCount(),21);
-  eq(r.getCapturedDaysCount(),1);eq(r.getEstimatedDaysCount(),20);eq(r.getCapturedKwh(),20.0);
-  eq(r.getEstimatedMissingKwh(),400.0);eq(r.getActualKwh(),420.0);eq(r.getExpectedKwh(),560.0);
-  site.setGridConnectionDate(null);eq(row(start,end,end,Map.of(swap,20.0)).getActualKwh(),420.0);
-  site.setSwapDate(start.minusDays(10));eq(row(start,end,end,Map.of(start,20.0)).getFilterDaysCount(),30);
-  site.setSwapDate(swap);r=row(start,end,swap.plusDays(1),Map.of(swap,20.0));
-  eq(r.getProductionEndDate(),"2025-11-11");eq(r.getFilterDaysCount(),2);eq(r.getActualKwh(),40.0);
-  r=row(start,end,end,Map.of());eq(r.getActualKwh(),560.0);eq(r.getEstimatedMissingKwh(),560.0);eq(r.getEstimatedDaysCount(),21);
-  site.setSwapDate(end.plusDays(1));r=row(start,end,end,Map.of());eq(r.getProductionDaysCount(),0);eq(r.getActualKwh(),null);
-  site.setSwapDate(null);r=row(start,end,end,Map.of(start,20.0));
-  eq(r.getExpectedKwh(),null);eq(r.getCapturedKwh(),null);eq(r.getEstimatedMissingKwh(),null);eq(r.getActualKwh(),null);eq(r.getDataStatus(),"MISSING_ORIGIN_DATE");
-  site.setSwapDate(LocalDate.of(2026,1,1));site.setGridConnectionDate("2026-02-01");
-  r=row(LocalDate.of(2025,5,1),LocalDate.of(2026,5,1),LocalDate.of(2026,5,1),Map.of());
-  eq(r.getProductionDaysCount(),121);eq(r.getProductionStartDate(),"2026-01-01");
-  // Reference must use the common filter, including valid peer days before the target swap.
-  site.setSwapDate(swap);
-  var peerDoc = new SiteDocument();
-  peerDoc.setSiteCode("ARI_peer");
-  var peerValues = Map.of(start, 30.0);
-  var peer = new DailySiteProduction(peerDoc,"ARI_peer","ARI_peer","ARI","Zone A",5,start,peerValues,peerValues.keySet());
-  var target = new DailySiteProduction(site,"ARI_1","ARI_1","ARI","Zone A",10,swap,Map.of(),Set.of());
-  r=(PerformanceReportRowDto)toRow.invoke(service,site,ctor.newInstance(start,end),end,target,List.of(target,peer));
-  eq(r.getActualKwh(),1260.0); eq(r.getCapturedDaysCount(),0);eq(r.getEstimatedDaysCount(),21);
-  var collect=PerformanceReportService.class.getDeclaredMethod("collectDailyValues",SiteDocument.class,List.class,LocalDate.class,LocalDate.class,Map.class,Set.class,Map.class);
-  collect.setAccessible(true);
-  Map<LocalDate,Double> loadedValues = new HashMap<>();
-  collect.invoke(service,site,List.of(new com.fusionsolar.monitoring.dto.HistoryPointDto(
-    start.atStartOfDay(ZoneId.of("Africa/Tunis")).toInstant().toEpochMilli(),9.999)),start,end,loadedValues,new HashSet<LocalDate>(),new HashMap<>());
-  eq(loadedValues.get(start),9.999);
-  load=PerformanceReportService.class.getDeclaredMethod("loadSiteProduction",SiteDocument.class,LocalDate.class,LocalDate.class);load.setAccessible(true);
-  var loaded=(DailySiteProduction)load.invoke(service,site,null,null);eq(loaded.swapDate(),site.getSwapDate());
-
+ @Test void appliesOriginAndFilterBoundaries() throws Exception {
+  var service=new PerformanceReportService(null,null,null,engine,null,null);
+  var range=Class.forName(PerformanceReportService.class.getName()+"$ReportRange");
+  var ctor=range.getDeclaredConstructor(LocalDate.class,LocalDate.class);ctor.setAccessible(true);
+  var method=PerformanceReportService.class.getDeclaredMethod("toRow",com.fusionsolar.monitoring.persistence.document.SiteDocument.class,range,LocalDate.class,ProductionEstimationService.DailySiteProduction.class,List.class);method.setAccessible(true);
+  var d=doc("ARI_1",10,JAN.plusDays(4),JAN.plusDays(1).toString());var s=site(d,Map.of(JAN,999.0,JAN.plusDays(1),32.3));
+  var r=(com.fusionsolar.monitoring.dto.PerformanceReportRowDto)method.invoke(service,d,ctor.newInstance(JAN,JAN.plusDays(5)),JAN.plusDays(3),s,List.of(s));
+  eq(r.getProductionStartDate(),"2025-01-02");eq(r.getProductionEndDate(),"2025-01-04");eq(r.getProductionDaysCount(),3);
+  eq(r.getCapturedDaysCount(),1);eq(r.getEstimatedDaysCount(),2);near(r.getActualKwh(),96.9);near(r.getExpectedKwh(),96.9);
+  d.setSwapDate(null);var mesOnly=(com.fusionsolar.monitoring.dto.PerformanceReportRowDto)method.invoke(service,d,ctor.newInstance(JAN,JAN.plusDays(5)),JAN.plusDays(3),s,List.of(s));
+  eq(mesOnly.getActualKwh(),r.getActualKwh());eq(mesOnly.getDataStatus(),"OK");
+  d.setGridConnectionDate(null);var unavailable=(com.fusionsolar.monitoring.dto.PerformanceReportRowDto)method.invoke(service,d,ctor.newInstance(JAN,JAN.plusDays(5)),JAN.plusDays(3),s,List.of(s));
+  eq(unavailable.getActualKwh(),null);eq(unavailable.getDataStatus(),"MISSING_ORIGIN_DATE");
  }
 }

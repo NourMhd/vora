@@ -4,7 +4,6 @@ import com.fusionsolar.monitoring.dto.*;
 import com.fusionsolar.monitoring.persistence.document.*;
 import com.fusionsolar.monitoring.persistence.enums.Brand;
 import com.fusionsolar.monitoring.persistence.repositories.SiteDeviceRepository;
-import com.fusionsolar.monitoring.util.LifetimeEnergyAllocation;
 import java.lang.reflect.*;
 import java.time.*;
 import java.util.*;
@@ -47,16 +46,16 @@ public class CumulativeOriginRulesChecks {
           {"2025-03-05","2025-03-10","2025-03-05"}};
         for(var example:examples){
             site.setSwapDate(example[0]==null?null:LocalDate.parse(example[0]));site.setGridConnectionDate(example[1]);
-            var origin=LifetimeEnergyAllocation.origin(site.getSwapDate(),example[1]==null?null:LocalDate.parse(example[1]));
             var actual=row(report,site,start,end,yesterday);var legacy=row(fallback,site,start,end,yesterday);
             eq(actual.getProductionStartDate(),example[2]);eq(actual.getProductionEndDate(),"2025-12-31");
             eq(actual.getExpectedKwh(),legacy.getExpectedKwh());
-            eq(actual.getEstimatedMissingKwh(),0.0);eq(actual.getEstimatedDaysCount(),0);
-            double numerator=engine.theoreticalYieldPerKwc("Zone A",LocalDate.parse(example[2]),end);
-            double denominator=engine.theoreticalYieldPerKwc("Zone A",origin,today);
-            eq(actual.getCapturedKwh(),rounded(10000*numerator/denominator));
-            eq(actual.getActualKwh(),actual.getCapturedKwh());
-            if(example[0]!=null&&example[0].equals("2024-12-12"))eq(actual.getCapturedKwh(),rounded(10000*1650.3/3261.8));
+            eq(actual.getCapturedKwh(),0.0);
+            eq(actual.getEstimatedDaysCount(),actual.getProductionDaysCount());
+            eq(actual.getActualKwh(),actual.getEstimatedMissingKwh());
+            eq(actual.getActualKwh(),legacy.getActualKwh());
+            // Rounding per month can introduce only a few cents versus the exact annual 84% ratio.
+            checks++;if(Math.abs(actual.getActualKwh()-0.84*actual.getExpectedKwh())>0.10)
+                throw new AssertionError("84% fallback mismatch");
         }
         // No dates: no energy, no day counts, even when the inverter is available.
         site.setSwapDate(null);site.setGridConnectionDate(null);

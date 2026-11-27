@@ -18,10 +18,10 @@ public class LifetimeEnergyAllocationChecks {
         var service = new ProductionEstimationService();
         ToDoubleBiFunction<LocalDate, LocalDate> weights = (a,b) -> service.theoreticalYieldPerKwc("Zone A",a,b);
         LocalDate start = LocalDate.of(2025,1,1), end = LocalDate.of(2025,2,28);
-        // Independently calculated theoretical weights: January 73.5; February 89.
-        close(LifetimeEnergyAllocation.allocate(1625.0,start,end,start,LocalDate.of(2025,1,31),weights),735);
-        close(LifetimeEnergyAllocation.allocate(1625.0,start,end,LocalDate.of(2025,2,1),end,weights),890);
-        close(LifetimeEnergyAllocation.allocate(1625.0,start,end,LocalDate.of(2025,1,5),LocalDate.of(2025,1,15),weights),252);
+        // Independently calculated revised weights: January 103.163; February 108.79.
+        close(LifetimeEnergyAllocation.allocate(1625.0,start,end,start,LocalDate.of(2025,1,31),weights),1625*103.163/(103.163+108.79));
+        close(LifetimeEnergyAllocation.allocate(1625.0,start,end,LocalDate.of(2025,2,1),end,weights),1625*108.79/(103.163+108.79));
+        close(LifetimeEnergyAllocation.allocate(1625.0,start,end,LocalDate.of(2025,1,5),LocalDate.of(2025,1,15),weights),1625*(6*3.230+5*3.299)/(103.163+108.79));
         close(LifetimeEnergyAllocation.allocate(1625.0,start,end,start.minusYears(1),end.plusYears(1),weights),1625);
         close(LifetimeEnergyAllocation.allocate(1625.0,start,end,start.minusYears(1),start.minusDays(1),weights),0);
         close(LifetimeEnergyAllocation.allocate(1625.0,start,end,end.plusDays(1),end.plusMonths(1),weights),0);

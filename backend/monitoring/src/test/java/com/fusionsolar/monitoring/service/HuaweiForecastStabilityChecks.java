@@ -36,32 +36,23 @@ public class HuaweiForecastStabilityChecks {
                 site.getSwapDate(),Map.of(),Set.of());
         var baseline=(PerformanceReportRowDto)method.invoke(withoutCache,site,ctor.newInstance(start,end),yesterday,daily,List.of(daily));
         var current=(PerformanceReportRowDto)method.invoke(withCache,site,ctor.newInstance(start,end),yesterday,daily,List.of(daily));
-        eq(current.getExpectedKwh(),194.71);eq(current.getExpectedKwh(),baseline.getExpectedKwh());
-        eq(current.getActualKwh(),current.getCapturedKwh());eq(current.getEstimatedMissingKwh(),0.0);
-        checks++;if(current.getCapturedKwh()==null||current.getCapturedKwh()<=0)throw new AssertionError("MES after swap must allocate");
-        eq(current.getEstimatedDaysCount(),0);eq(current.getProductionStartDate(),"2025-12-12");
-        // An earlier MES expands only the cumulative window; the forecast stays unchanged.
+        eq(current.getExpectedKwh(),baseline.getExpectedKwh());eq(current.getActualKwh(),baseline.getActualKwh());
+        eq(current.getCapturedKwh(),0.0);eq(current.getEstimatedDaysCount(),20);eq(current.getProductionStartDate(),"2025-12-12");
+        // An earlier MES now expands BOTH forecast and retained production windows.
         site.setGridConnectionDate("2024-01-01");
         current=(PerformanceReportRowDto)method.invoke(withCache,site,ctor.newInstance(start,end),yesterday,daily,List.of(daily));
-        eq(current.getExpectedKwh(),baseline.getExpectedKwh());eq(current.getProductionDaysCount(),365);
-        eq(current.getProductionStartDate(),"2025-01-01");eq(current.getProductionEndDate(),baseline.getProductionEndDate());
-        eq(current.getEstimatedMissingKwh(),0.0);
-        checks++;if(current.getCapturedKwh()==null||current.getCapturedKwh()<=0)throw new AssertionError("No allocation");
-        // Invalidating the cache changes energy source, never the forecast.
+        eq(current.getProductionDaysCount(),365);eq(current.getProductionStartDate(),"2025-01-01");
+        checks++; if(current.getExpectedKwh()<=baseline.getExpectedKwh())throw new AssertionError("Earlier origin must expand forecast");
+        var fullYear=current;
         cache.setInverterTotalObservedAt(Map.of("1",Instant.now().minusSeconds(1201)));
         var stale=(PerformanceReportRowDto)method.invoke(withCache,site,ctor.newInstance(start,end),yesterday,daily,List.of(daily));
-        eq(stale.getExpectedKwh(),current.getExpectedKwh());eq(stale.getActualKwh(),baseline.getActualKwh());
-        // Current-year filters keep the original cutoff at yesterday even with a fresh counter.
-        cache.setInverterTotalObservedAt(Map.of("1",Instant.now()));
+        eq(stale.getExpectedKwh(),fullYear.getExpectedKwh());eq(stale.getActualKwh(),fullYear.getActualKwh());
         var yearStart=LocalDate.of(2026,1,1);var yearEnd=LocalDate.of(2026,12,31);
-        baseline=(PerformanceReportRowDto)method.invoke(withoutCache,site,ctor.newInstance(yearStart,yearEnd),yesterday,daily,List.of(daily));
         current=(PerformanceReportRowDto)method.invoke(withCache,site,ctor.newInstance(yearStart,yearEnd),yesterday,daily,List.of(daily));
-        eq(current.getExpectedKwh(),baseline.getExpectedKwh());eq(current.getProductionEndDate(),"2026-11-23");
-        // A missing swap must not introduce a new theoretical forecast.
+        eq(current.getProductionEndDate(),"2026-11-23");
         site.setSwapDate(null);
         current=(PerformanceReportRowDto)method.invoke(withCache,site,ctor.newInstance(start,end),yesterday,null,List.of());
-        eq(current.getExpectedKwh(),null);eq(current.getDataStatus(),"MISSING_EXPECTED_KWH");
-        checks++;if(current.getActualKwh()==null)throw new AssertionError("Single MES must allocate");
+        eq(current.getExpectedKwh(),fullYear.getExpectedKwh());eq(current.getActualKwh(),fullYear.getActualKwh());eq(current.getDataStatus(),"OK");
         System.out.println("Forecast stability: "+checks+" checks passed");
     }
 }

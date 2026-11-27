@@ -12,6 +12,7 @@ void main() {
       'actualKwh': null,
     });
     expect(row.hasMissingOriginDate, isTrue);
+    expect(row.hasProductionOriginDate, isFalse);
     expect(row.hasMissingProductionDates, isTrue);
     expect(row.hasMissingData, isTrue);
     expect(row.expectedKwh, isNull);
@@ -20,17 +21,31 @@ void main() {
     expect(row.actualKwh, isNull);
   });
 
-  test('A single MES with allocated energy is not marked as missing dates', () {
+  test('A single MES is a valid origin even without a swap', () {
     final row = PerformanceReportRow.fromJson({
       'gridConnectionDate': '2025-01-05',
       'swapDate': null,
       'productionStartDate': '2025-01-05',
-      'capturedKwh': 100,
-      'actualKwh': 100,
-      'dataStatus': 'MISSING_EXPECTED_KWH',
+      'capturedKwh': 0,
+      'estimatedMissingKwh': 84,
+      'expectedKwh': 100,
+      'actualKwh': 84,
+      'dataStatus': 'OK',
     });
     expect(row.hasMissingOriginDate, isFalse);
     expect(row.hasMissingProductionDates, isFalse);
-    expect(row.actualKwh, 100);
+    expect(row.hasProductionOriginDate, isTrue);
+    expect(row.actualKwh, 84);
+  });
+
+  test('A single swap is a valid origin and a future origin still exists', () {
+    final row = PerformanceReportRow.fromJson({
+      'swapDate': '2027-01-01',
+      'gridConnectionDate': null,
+      'dataStatus': 'NO_PRODUCTION_IN_FILTER',
+      'actualKwh': 0,
+    });
+    expect(row.hasProductionOriginDate, isTrue);
+    expect(row.hasMissingProductionDates, isFalse);
   });
 }

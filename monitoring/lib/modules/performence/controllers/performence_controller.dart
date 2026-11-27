@@ -138,8 +138,8 @@ class PerformanceController extends GetxController {
           (row.governorate ?? '').toLowerCase().contains(query);
 
       final matchesResult = result == 'ALL' || row.bonusMalus.toUpperCase() == result;
-      final hasSwapDate = row.swapDate?.trim().isNotEmpty == true;
-      final isEligibleOffline = normalizedStatus == 'DISCONNECTED' && hasSwapDate;
+      final hasOriginDate = row.hasProductionOriginDate;
+      final isEligibleOffline = normalizedStatus == 'DISCONNECTED' && hasOriginDate;
       final matchesStatus = status == 'ALL'
           ? normalizedStatus == 'HEALTHY' ||
               normalizedStatus == 'FAULTY' ||
@@ -177,10 +177,10 @@ class PerformanceController extends GetxController {
 
   Iterable<PerformanceReportRow> get comparableRows => rows.where((row) {
         final status = _normalizeStatus(row.siteStatus);
-        final hasSwapDate = row.swapDate?.trim().isNotEmpty == true;
+        final hasOriginDate = row.hasProductionOriginDate;
         return status == 'HEALTHY' ||
             status == 'FAULTY' ||
-            (status == 'DISCONNECTED' && hasSwapDate);
+            (status == 'DISCONNECTED' && hasOriginDate);
       });
 
   int get bonusCount => comparableRows.where((row) => row.isBonus).length;
